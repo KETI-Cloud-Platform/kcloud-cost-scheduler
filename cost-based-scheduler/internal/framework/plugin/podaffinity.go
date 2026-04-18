@@ -55,20 +55,7 @@ func (p *PodAffinity) Score(ctx context.Context, pod *v1.Pod, nodeName string) (
 		return 10, utils.NewStatus(utils.Success, "")
 	}
 
-	podJobName := ""
-	podQueueName := ""
-	if pod.Labels != nil {
-		if v := pod.Labels["batch.kubernetes.io/job-name"]; v != "" {
-			podJobName = v
-		} else if v := pod.Labels["job-name"]; v != "" {
-			podJobName = v
-		}
-		if v := pod.Labels["kueue.x-k8s.io/queue-name"]; v != "" {
-			podQueueName = v
-		} else if v := pod.Labels["queue-name"]; v != "" {
-			podQueueName = v
-		}
-	}
+	podJobName, podQueueName := getPodJobAndQueueNames(pod)
 
 	sameJobCount := 0
 	sameQueueCount := 0
@@ -87,19 +74,7 @@ func (p *PodAffinity) Score(ctx context.Context, pod *v1.Pod, nodeName string) (
 			continue
 		}
 
-		existingLabels := existingPod.Labels
-		if existingLabels == nil {
-			continue
-		}
-
-		existingJob := existingLabels["batch.kubernetes.io/job-name"]
-		if existingJob == "" {
-			existingJob = existingLabels["job-name"]
-		}
-		existingQueue := existingLabels["kueue.x-k8s.io/queue-name"]
-		if existingQueue == "" {
-			existingQueue = existingLabels["queue-name"]
-		}
+		existingJob, existingQueue := getPodJobAndQueueNames(existingPod)
 
 		if podJobName != "" && existingJob == podJobName {
 			sameJobCount++
@@ -204,4 +179,22 @@ func (p *PodAffinity) getNodeInfo(nodeName string) *utils.NodeInfo {
 		return nil
 	}
 	return nodes[nodeName]
+}
+
+// getPodJobAndQueueNames extracts job and queue names from pod labels.
+func getPodJobAndQueueNames(pod *v1.Pod) (jobName string, queueName string) {
+	if pod.Labels == nil {
+		return "", ""
+	}
+	if v := pod.Labels["batch.kubernetes.io/job-name"]; v != "" {
+		jobName = v
+	} else if v := pod.Labels["job-name"]; v != "" {
+		jobName = v
+	}
+	if v := pod.Labels["kueue.x-k8s.io/queue-name"]; v != "" {
+		queueName = v
+	} else if v := pod.Labels["queue-name"]; v != "" {
+		queueName = v
+	}
+	return jobName, queueName
 }

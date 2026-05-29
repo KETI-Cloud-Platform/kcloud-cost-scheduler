@@ -62,8 +62,15 @@ func (c *CostEfficiency) Score(ctx context.Context, pod *v1.Pod, nodeName string
 		return 0, utils.NewStatus(utils.Success, "")
 	}
 
+	if costPerHour <= 0 {
+		klog.V(4).InfoS("CostEfficiency: costPerHour is invalid, returning neutral score",
+			"node", nodeName, "costPerHour", costPerHour)
+		return 5, utils.NewStatus(utils.Success, "costPerHour missing or invalid")
+	}
+
 	costPerInference := costPerHour / perfScore
 
+	// TODO: maxCostPerInference 값을 하드코딩 대신, 가속기 유형 또는 설정으로부터 동적으로 로드하도록 개선 필요
 	const maxCostPerInference = 0.01
 	normalizedCost := costPerInference / maxCostPerInference
 	if normalizedCost > 1.0 {

@@ -11,6 +11,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io/ioutil" // Use ioutil for Go < 1.16, or io.ReadAll for Go >= 1.16
 	"net/http"
 	"time"
 
@@ -41,19 +42,64 @@ type ExtenderBindingArgs struct {
 type HAMiExtenderClient struct {
 	baseURL    string
 	httpClient *http.Client
+	retries    int
+	retryDelay time.Duration
 }
 
 func NewHAMiExtenderClient() *HAMiExtenderClient {
 	return &HAMiExtenderClient{
-		baseURL: "https://10.109.140.73:443",
+		baseURL: "https://10.109.140.73:443", // TODO: Base URL should be configurable
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 			Transport: &http.Transport{
 				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 			},
 		},
+		retries:    3,             // Default retries
+		retryDelay: 1 * time.Second, // Default retry delay
 	}
 }
+
+func (c *HAMiExtenderClient) doRequest(method, path string, payload []byte) ([]byte, error) {
+	var resp *http.Response
+	var err error
+	url := c.baseURL + path
+
+	for i := 0; i <= c.retries; i++ {
+		req, _ := http.NewRequest(method, url, bytes.NewBuffer(payload))
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err = c.httpClient.Do(req)
+		if err == nil && resp.StatusCode == http.StatusOK {
+			break
+		}
+
+		klog.V(4).InfoS("HAMi Extender request failed, retrying...",
+			"attempt", i+1, "maxAttempts", c.retries+1,
+			"url", url, "error", err, "statusCode", resp.StatusCode)
+
+		if i < c.retries {
+			time.Sleep(c.retryDelay)
+		}
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("HAMi Extender request failed after %d retries: %w", c.retries+1, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := ioutil.ReadAll(resp.Body) // Read body for detailed error
+		return nil, fmt.Errorf("HAMi Extender returned non-OK status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	bodyBytes, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+	return bodyBytes, nil
+}
+
 
 func (c *HAMiExtenderClient) Filter(pod *v1.Pod, nodes []*v1.Node) ([]*v1.Node, error) {
 	if !hasGPURequest(pod) {
@@ -71,20 +117,16 @@ func (c *HAMiExtenderClient) Filter(pod *v1.Pod, nodes []*v1.Node) ([]*v1.Node, 
 	}
 
 	payload, _ := json.Marshal(args)
-	resp, err := c.httpClient.Post(c.baseURL+"/filter", "application/json", bytes.NewBuffer(payload))
+	
+	respBody, err := c.doRequest("POST", "/filter", payload)
 	if err != nil {
-		klog.Warningf("HAMi Extender filter failed (falling back): %v", err)
-		return nodes, nil
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		klog.Warningf("HAMi Extender returned non-OK status: %d", resp.StatusCode)
-		return nodes, nil
+		klog.Warningf("HAMi Extender filter failed (falling back to default scheduler): %v", err)
+		return nodes, nil // Fallback to default scheduler by not filtering
 	}
 
 	var result ExtenderFilterResult
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		klog.Warningf("Failed to decode HAMi Extender filter response: %v", err)
 		return nodes, nil
 	}
 
@@ -116,16 +158,12 @@ func (c *HAMiExtenderClient) Bind(pod *v1.Pod, node string) error {
 	}
 
 	payload, _ := json.Marshal(args)
-	resp, err := c.httpClient.Post(c.baseURL+"/bind", "application/json", bytes.NewBuffer(payload))
+	respBody, err := c.doRequest("POST", "/bind", payload)
 	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HAMi bind status: %d", resp.StatusCode)
+		return fmt.Errorf("HAMi Extender bind failed: %w", err)
 	}
 
+	klog.V(4).InfoS("HAMi Extender bind successful", "pod", klog.KObj(pod), "node", node, "response", string(respBody))
 	return nil
 }
 

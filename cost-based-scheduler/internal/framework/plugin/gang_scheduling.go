@@ -79,7 +79,7 @@ func (g *GangScheduling) Permit(ctx context.Context, pod *v1.Pod, nodeName strin
 
 	klog.V(3).InfoS("GangScheduling: pod arrived at Permit",
 		"pod", klog.KObj(pod), "job", jobKey,
-		"arrived", arrived, "expected", expected)
+		"arrived", arrived, "expected", expected, "remaining", expected-arrived)
 
 	if arrived >= expected {
 		g.mu.Lock()
@@ -120,7 +120,7 @@ func (g *GangScheduling) WaitForGang(ctx context.Context, pod *v1.Pod, timeout t
 		return utils.NewStatus(utils.Success, "")
 	case <-time.After(timeout):
 		klog.V(2).InfoS("GangScheduling: gang wait timed out",
-			"pod", klog.KObj(pod), "job", jobKey, "timeout", timeout)
+			"pod", klog.KObj(pod), "job", jobKey, "timeout", timeout, "expected", entry.expected, "arrived", entry.arrived)
 		g.mu.Lock()
 		if e, ok := g.gangs[jobKey]; ok {
 			select {
@@ -131,7 +131,7 @@ func (g *GangScheduling) WaitForGang(ctx context.Context, pod *v1.Pod, timeout t
 		}
 		g.mu.Unlock()
 		return utils.NewStatus(utils.Unschedulable,
-			fmt.Sprintf("gang %s: timed out waiting for all %d pods", jobKey, g.getExpected(jobKey)))
+			fmt.Sprintf("gang %s: timed out waiting for %d pods (arrived: %d)", jobKey, entry.expected, entry.arrived))
 	case <-ctx.Done():
 		return utils.NewStatus(utils.Unschedulable, "context cancelled")
 	}

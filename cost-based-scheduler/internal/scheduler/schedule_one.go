@@ -9,13 +9,17 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	logger "github.com/KETI-Cloud-Platform/kcloud-cost-scheduler/cost-based-scheduler/internal/backend/log"
 	internalqueue "github.com/KETI-Cloud-Platform/kcloud-cost-scheduler/cost-based-scheduler/internal/backend/queue"
+	"github.com/KETI-Cloud-Platform/kcloud-cost-scheduler/cost-based-scheduler/internal/decisionrecorder"
 	framework "github.com/KETI-Cloud-Platform/kcloud-cost-scheduler/cost-based-scheduler/internal/framework"
 	utils "github.com/KETI-Cloud-Platform/kcloud-cost-scheduler/cost-based-scheduler/internal/framework/utils"
+	"github.com/KETI-Cloud-Platform/kcloud-cost-scheduler/cost-based-scheduler/internal/placementchecks"
 
+	"github.com/google/uuid"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 )
@@ -59,9 +63,9 @@ func (sched *Scheduler) ScheduleOne(ctx context.Context) {
 				pod.Namespace, pod.Name))
 			return
 		}
-		logger.Warn(fmt.Sprintf("[schedule] 스케줄링 실패, 재큐: pod=%s/%s reason=%s",
-			pod.Namespace, pod.Name, status.Message()))
-		sched.SchedulingQueue.Add(pod)
+		logger.Warn(fmt.Sprintf("[schedule] 스케줄링 실패, 재큐(backoff): pod=%s/%s reason=%s attempts=%d",
+			pod.Namespace, pod.Name, status.Message(), podInfo.Attempts))
+		sched.SchedulingQueue.AddUnschedulable(podInfo)
 		return
 	}
 
@@ -147,11 +151,12 @@ func (sched *Scheduler) bindingCycle(
 	assumedPod := assumedPodInfo.Pod
 
 	if permitStatus := fwk.RunPermitPlugins(ctx, assumedPod, scheduleResult.SuggestedHost); !permitStatus.IsSuccess() {
-		logger.Warn(fmt.Sprintf("[bind] Permit 거부, 재큐: pod=%s/%s reason=%s",
+		logger.Warn(fmt.Sprintf("[bind] Permit 거부, 재큐(backoff): pod=%s/%s reason=%s",
 			assumedPod.Namespace, assumedPod.Name, permitStatus.Message()))
 		_ = sched.Cache.RemovePod(assumedPod)
 		sched.SchedulingQueue.Done(assumedPod.UID)
-		sched.SchedulingQueue.Add(assumedPod)
+		sched.SchedulingQueue.AddUnschedulable(assumedPodInfo)
+		sched.recordBindOutcome(scheduleResult.AttemptID, assumedPod, scheduleResult.SuggestedHost, false, permitStatus.Message())
 		return utils.NewStatus(utils.Unschedulable, permitStatus.Message())
 	}
 
@@ -160,11 +165,12 @@ func (sched *Scheduler) bindingCycle(
 			assumedPod.Namespace, assumedPod.Name, scheduleResult.SuggestedHost))
 
 		if err := sched.hamiClient.Bind(assumedPod, scheduleResult.SuggestedHost); err != nil {
-			logger.Error(fmt.Sprintf("[HAMi] bind 실패, 재큐: pod=%s/%s err=%v",
+			logger.Error(fmt.Sprintf("[HAMi] bind 실패, 재큐(backoff): pod=%s/%s err=%v",
 				assumedPod.Namespace, assumedPod.Name, err), err)
 			_ = sched.Cache.RemovePod(assumedPod)
 			sched.SchedulingQueue.Done(assumedPod.UID)
-			sched.SchedulingQueue.Add(assumedPod)
+			sched.SchedulingQueue.AddUnschedulable(assumedPodInfo)
+			sched.recordBindOutcome(scheduleResult.AttemptID, assumedPod, scheduleResult.SuggestedHost, false, err.Error())
 			return utils.NewStatus(utils.Error, err.Error())
 		}
 
@@ -172,19 +178,22 @@ func (sched *Scheduler) bindingCycle(
 			assumedPod.Namespace, assumedPod.Name, scheduleResult.SuggestedHost))
 		sched.finishBinding(fwk, assumedPod, scheduleResult.SuggestedHost)
 		sched.SchedulingQueue.Done(assumedPod.UID)
+		sched.recordBindOutcome(scheduleResult.AttemptID, assumedPod, scheduleResult.SuggestedHost, true, "")
 		return nil
 	}
 
 	if err := sched.runBindPlugin(ctx, fwk, assumedPod, &scheduleResult); err != nil {
-		logger.Warn(fmt.Sprintf("[bind] DefaultBinder 실패, 재큐: pod=%s/%s node=%s err=%v",
+		logger.Warn(fmt.Sprintf("[bind] DefaultBinder 실패, 재큐(backoff): pod=%s/%s node=%s err=%v",
 			assumedPod.Namespace, assumedPod.Name, scheduleResult.SuggestedHost, err))
 		_ = sched.Cache.RemovePod(assumedPod)
 		sched.SchedulingQueue.Done(assumedPod.UID)
-		sched.SchedulingQueue.Add(assumedPod)
+		sched.SchedulingQueue.AddUnschedulable(assumedPodInfo)
+		sched.recordBindOutcome(scheduleResult.AttemptID, assumedPod, scheduleResult.SuggestedHost, false, err.Error())
 		return utils.NewStatus(utils.Error, err.Error())
 	}
 
 	sched.SchedulingQueue.Done(assumedPod.UID)
+	sched.recordBindOutcome(scheduleResult.AttemptID, assumedPod, scheduleResult.SuggestedHost, true, "")
 	return nil
 }
 
@@ -203,11 +212,33 @@ func (sched *Scheduler) schedulePod(ctx context.Context, fwk framework.Framework
 	}
 	scheduleResult := NewScheduleResult(nodes)
 
+	cfg, cfgErr := sched.resolveRequiredChecksConfig()
+	if cfgErr != nil {
+		return scheduleResult, fmt.Errorf("required-checks config: %w", cfgErr)
+	}
+	meta := placementchecks.AttemptMeta{
+		AttemptID:     uuid.NewString(),
+		PodNamespace:  pod.Namespace,
+		PodName:       pod.Name,
+		PodUID:        string(pod.UID),
+		StartedAt:     time.Now().UTC(),
+		ConfigVersion: cfg.Version,
+	}
+	scheduleResult.AttemptID = meta.AttemptID
+	snap := placementchecks.Snapshot{ID: uuid.NewString(), TakenAt: meta.StartedAt, Nodes: map[string]placementchecks.NodeTelemetry{}}
+	if sched.PlacementStore != nil {
+		snap = sched.PlacementStore.Snapshot()
+		meta.SnapshotID = snap.ID
+	}
+	attempt := utils.NewAttemptState(meta, snap, placementchecks.ParseRequest(pod), cfg)
+	ctx = utils.WithAttempt(ctx, attempt)
+	sched.recordSchedulingAttempt(meta)
+
 	if err = sched.runFilterPlugin(ctx, fwk, pod, &scheduleResult); err != nil {
-		return result, err
+		return scheduleResult, err
 	}
 
-	if hasGPURequest(pod) {
+	if hasGPURequest(pod) && hasHAMiManagedCandidate(sched, scheduleResult.PluginResultMap) {
 		feasibleNodes := make([]*v1.Node, 0)
 		for nodeName, pr := range scheduleResult.PluginResultMap {
 			if !pr.IsFiltered {
@@ -219,7 +250,21 @@ func (sched *Scheduler) schedulePod(ctx context.Context, fwk framework.Framework
 
 		if len(feasibleNodes) > 0 {
 			hamiFilteredNodes, hamiErr := sched.hamiClient.Filter(pod, feasibleNodes)
-			if hamiErr == nil {
+			if hamiErr != nil {
+				// Preserve prior candidates; record communication failure without inventing PASS.
+				for nodeName, pr := range scheduleResult.PluginResultMap {
+					if pr.IsFiltered {
+						continue
+					}
+					pr.RejectionReasons = append(pr.RejectionReasons, placementchecks.RejectionReason{
+						Stage:  "hami_filter",
+						Check:  "hami",
+						Code:   "hami_filter_error",
+						Detail: hamiErr.Error(),
+					})
+					scheduleResult.PluginResultMap[nodeName] = pr
+				}
+			} else {
 				keepSet := make(map[string]bool, len(hamiFilteredNodes))
 				for _, n := range hamiFilteredNodes {
 					keepSet[n.Name] = true
@@ -229,6 +274,15 @@ func (sched *Scheduler) schedulePod(ctx context.Context, fwk framework.Framework
 					if !pr.IsFiltered {
 						if !keepSet[nodeName] {
 							pr.IsFiltered = true
+							st := utils.NewStatus(utils.Unschedulable, "excluded by HAMi filter")
+							st.SetPlugin("HAMiExtender")
+							pr.FilteredStatus = *st
+							pr.RejectionReasons = append(pr.RejectionReasons, placementchecks.RejectionReason{
+								Stage:  "hami_filter",
+								Check:  "hami",
+								Code:   "hami_filtered",
+								Detail: "node excluded by HAMi filter",
+							})
 							scheduleResult.PluginResultMap[nodeName] = pr
 						} else {
 							newFeasible++
@@ -240,27 +294,34 @@ func (sched *Scheduler) schedulePod(ctx context.Context, fwk framework.Framework
 		}
 	}
 
+	// Final candidate JSONL after local Filters + HAMi (includes legacy/HAMi exclusions).
+	sched.recordFinalCandidates(scheduleResult, pod)
+
+	// Pending 사유를 남길 수 있도록 실패 시에도 Node별 Filter 결과를 함께 돌려준다.
 	if scheduleResult.FeasibleNodes == 0 {
-		return result, fmt.Errorf("대상 Pod %s/%s를 배치할 수 있는 노드가 없음: 모든 노드 필터링됨",
+		return scheduleResult, fmt.Errorf("대상 Pod %s/%s를 배치할 수 있는 노드가 없음: 모든 노드 필터링됨",
 			pod.Namespace, pod.Name)
 	}
 
-	if scheduleResult.FeasibleNodes == 1 {
-		for name, pr := range scheduleResult.PluginResultMap {
-			if !pr.IsFiltered {
-				scheduleResult.SuggestedHost = name
-				return scheduleResult, nil
-			}
-		}
-		return result, fmt.Errorf("가용 노드 수 불일치: pod %s/%s", pod.Namespace, pod.Name)
-	}
-
+	// Always run Score plugins — including when only one node is feasible.
+	// CatalogAwareScore (shadow) must still look up Catalog and record
+	// placement_decision; skipping Score on the single-node fast path hid all
+	// Catalog E2E evidence on this cluster (one accelerator node).
 	if err = sched.runScorePlugin(ctx, fwk, pod, &scheduleResult); err != nil {
-		return result, err
+		return scheduleResult, err
 	}
 
-	err = sched.selectResource(pod, &scheduleResult)
+	err = sched.selectResource(fwk, pod, &scheduleResult)
 	return scheduleResult, err
+}
+
+func hasHAMiManagedCandidate(sched *Scheduler, results utils.PluginResultMap) bool {
+	for nodeName, result := range results {
+		if !result.IsFiltered && isHAMiManagedNode(sched, nodeName) {
+			return true
+		}
+	}
+	return false
 }
 
 func (sched *Scheduler) runFilterPlugin(ctx context.Context, fwk framework.Framework, pod *v1.Pod, scheduleResult *ScheduleResult) error {
@@ -272,6 +333,9 @@ func (sched *Scheduler) runFilterPlugin(ctx context.Context, fwk framework.Frame
 		if pr, exists := pluginResults[nodeName]; exists {
 			existingResult := scheduleResult.PluginResultMap[nodeName]
 			existingResult.IsFiltered = pr.IsFiltered
+			existingResult.FilteredStatus = pr.FilteredStatus
+			existingResult.RequiredChecks = pr.RequiredChecks
+			existingResult.RejectionReasons = pr.RejectionReasons
 			scheduleResult.PluginResultMap[nodeName] = existingResult
 			if !pr.IsFiltered {
 				feasibleNodes++
@@ -281,6 +345,79 @@ func (sched *Scheduler) runFilterPlugin(ctx context.Context, fwk framework.Frame
 
 	scheduleResult.FeasibleNodes = feasibleNodes
 	return nil
+}
+
+func (sched *Scheduler) resolveRequiredChecksConfig() (placementchecks.Config, error) {
+	if sched.RequiredChecksConfig != nil {
+		return *sched.RequiredChecksConfig, nil
+	}
+	path := os.Getenv("SCHED_REQUIRED_CHECKS_CONFIG")
+	cfg, err := placementchecks.LoadConfigFile(path)
+	if err != nil {
+		// Never silently replace a failed explicit/invalid load with DefaultConfig.
+		return placementchecks.Config{}, err
+	}
+	sched.RequiredChecksConfig = &cfg
+	return cfg, nil
+}
+
+func (sched *Scheduler) recordSchedulingAttempt(meta placementchecks.AttemptMeta) {
+	if sched.DecisionRecorder == nil {
+		return
+	}
+	sched.DecisionRecorder.Enqueue(decisionrecorder.Event{
+		Kind:      decisionrecorder.KindSchedulingAttempt,
+		AttemptID: meta.AttemptID,
+		Payload: map[string]any{
+			"pod_namespace":  meta.PodNamespace,
+			"pod_name":       meta.PodName,
+			"pod_uid":        meta.PodUID,
+			"snapshot_id":    meta.SnapshotID,
+			"config_version": meta.ConfigVersion,
+		},
+	})
+}
+
+func (sched *Scheduler) recordFinalCandidates(scheduleResult ScheduleResult, pod *v1.Pod) {
+	if sched.DecisionRecorder == nil {
+		return
+	}
+	podUID := ""
+	if pod != nil {
+		podUID = string(pod.UID)
+	}
+	for nodeName, pr := range scheduleResult.PluginResultMap {
+		payload := map[string]any{
+			"is_filtered":       pr.IsFiltered,
+			"rejection_reasons": pr.RejectionReasons,
+			"pod_uid":           podUID,
+		}
+		if pr.RequiredChecks != nil {
+			payload["checks"] = pr.RequiredChecks.Checks
+		}
+		sched.DecisionRecorder.RecordCandidateFinal(scheduleResult.AttemptID, nodeName, payload)
+	}
+}
+
+func (sched *Scheduler) recordBindOutcome(attemptID string, pod *v1.Pod, nodeName string, ok bool, detail string) {
+	if sched.DecisionRecorder == nil || pod == nil {
+		return
+	}
+	payload := map[string]any{
+		"pod_namespace": pod.Namespace,
+		"pod_name":      pod.Name,
+		"pod_uid":       string(pod.UID),
+		"success":       ok,
+	}
+	if detail != "" {
+		payload["detail"] = detail
+	}
+	sched.DecisionRecorder.Enqueue(decisionrecorder.Event{
+		Kind:      decisionrecorder.KindBindOutcome,
+		AttemptID: attemptID,
+		NodeName:  nodeName,
+		Payload:   payload,
+	})
 }
 
 func (sched *Scheduler) runScorePlugin(ctx context.Context, fwk framework.Framework, pod *v1.Pod, scheduleResult *ScheduleResult) error {
@@ -308,6 +445,16 @@ func (sched *Scheduler) runScorePlugin(ctx context.Context, fwk framework.Framew
 		if existing, ok := scheduleResult.PluginResultMap[nodeName]; ok {
 			existing.Scores = score.Scores
 			existing.TotalNodeScore = score.TotalNodeScore
+			// Preserve Filter result unless Score/Normalize marked the node filtered
+			// for cost ineligibility; always copy cost-first metadata from Score.
+			if score.IsFiltered {
+				existing.IsFiltered = true
+				existing.FilteredStatus = score.FilteredStatus
+			}
+			existing.CostSelectionActive = score.CostSelectionActive
+			existing.CostEligible = score.CostEligible
+			existing.PredictedNetEnergyJ = score.PredictedNetEnergyJ
+			existing.PredictedServerEnergyJ = score.PredictedServerEnergyJ
 			scheduleResult.PluginResultMap[nodeName] = existing
 
 			for _, pluginScore := range score.Scores {
@@ -327,21 +474,13 @@ func (sched *Scheduler) runScorePlugin(ctx context.Context, fwk framework.Framew
 	return nil
 }
 
-func (sched *Scheduler) selectResource(pod *v1.Pod, scheduleResult *ScheduleResult) error {
-	var bestNode string
-	bestScore := -1
-
-	for nodeName, pr := range scheduleResult.PluginResultMap {
-		if !pr.IsFiltered && pr.TotalNodeScore > bestScore {
-			bestScore = pr.TotalNodeScore
-			bestNode = nodeName
-		}
+func (sched *Scheduler) selectResource(fwk framework.Framework, pod *v1.Pod, scheduleResult *ScheduleResult) error {
+	bestNode, err := utils.SelectPreferredNode(scheduleResult.PluginResultMap)
+	// Record placement_decision after final selection so selected_enforced matches Bind.
+	fwk.CommitPlacementDecisions(pod, bestNode, err)
+	if err != nil {
+		return fmt.Errorf("Pod %s/%s를 위한 적절한 노드를 찾을 수 없음: %w", pod.Namespace, pod.Name, err)
 	}
-
-	if bestNode == "" {
-		return fmt.Errorf("Pod %s/%s를 위한 적절한 노드를 찾을 수 없음", pod.Namespace, pod.Name)
-	}
-
 	scheduleResult.SuggestedHost = bestNode
 	return nil
 }

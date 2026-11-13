@@ -29,6 +29,8 @@ const (
 	DefaultPodInitialBackoffDuration         time.Duration = 1 * time.Second
 	DefaultPodMaxBackoffDuration             time.Duration = 10 * time.Second
 	DefaultPodMaxInUnschedulablePodsDuration time.Duration = 5 * time.Minute
+	// DefaultPodMaxSchedulingAttempts 0 = unlimited backoff requeues.
+	DefaultPodMaxSchedulingAttempts = 0
 )
 
 type SchedulingQueue struct {
@@ -42,7 +44,9 @@ type SchedulingQueue struct {
 	podInitialBackoffDuration         time.Duration
 	podMaxBackoffDuration             time.Duration
 	podMaxInUnschedulablePodsDuration time.Duration
-	nsLister                          listersv1.NamespaceLister
+	// podMaxSchedulingAttempts caps failed ScheduleOne retries (0 = unlimited).
+	podMaxSchedulingAttempts int
+	nsLister                 listersv1.NamespaceLister
 }
 
 type LessFunc func(podInfo1, podInfo2 *QueuedPodInfo) bool
@@ -104,6 +108,48 @@ func (q *SchedulingQueue) Add(pod *v1.Pod) {
 	}
 }
 
+// SetMaxSchedulingAttempts configures how many failed pops may be requeued
+// via backoff (0 = unlimited). Safe to call before Run.
+func (q *SchedulingQueue) SetMaxSchedulingAttempts(n int) {
+	if q == nil {
+		return
+	}
+	q.lock.Lock()
+	defer q.lock.Unlock()
+	q.podMaxSchedulingAttempts = n
+}
+
+// AddUnschedulable requeues a failed attempt into the backoff queue without
+// sleeping in ScheduleOne. Attempts from Pop are preserved; delay uses
+// calculateBackoffDuration (aligned with RetryBackoff).
+func (q *SchedulingQueue) AddUnschedulable(pInfo *QueuedPodInfo) {
+	if pInfo == nil || pInfo.Pod == nil {
+		return
+	}
+	q.lock.Lock()
+	defer q.lock.Unlock()
+
+	pInfo.Timestamp = q.clock.Now()
+	if pInfo.InitialAttemptTimestamp == nil {
+		now := pInfo.Timestamp
+		pInfo.InitialAttemptTimestamp = &now
+	}
+
+	q.unschedulablePods.delete(pInfo.Pod)
+	_ = q.activeQ.delete(pInfo)
+
+	if q.podMaxSchedulingAttempts > 0 && pInfo.Attempts >= q.podMaxSchedulingAttempts {
+		// Give up further active retries; keep for diagnostics / later flush.
+		q.podBackoffQ.Delete(pInfo)
+		q.unschedulablePods.addOrUpdate(pInfo)
+		return
+	}
+
+	// Attempts=0 (never Pop'd) → immediate; after Pop, Attempts≥1 → exponential delay.
+	pInfo.BackoffExpiration = pInfo.Timestamp.Add(q.calculateBackoffDuration(pInfo))
+	q.podBackoffQ.AddOrUpdate(pInfo)
+}
+
 func (q *SchedulingQueue) Update(oldPod, newPod *v1.Pod) error {
 	q.lock.Lock()
 	defer q.lock.Unlock()
@@ -148,15 +194,16 @@ func (q *SchedulingQueue) Update(oldPod, newPod *v1.Pod) error {
 func (q *SchedulingQueue) Delete(pod *v1.Pod) error {
 	q.lock.Lock()
 	defer q.lock.Unlock()
-	q.DeleteNominatedPodIfExists(pod)
-	pInfo := newQueuedPodInfoForLookup(pod)
-	if err := q.activeQ.delete(pInfo); err != nil {
-		q.podBackoffQ.Delete(pInfo)
-		if pInfo = q.unschedulablePods.get(pod); pInfo != nil {
-			q.unschedulablePods.delete(pod)
-		}
+	if q.nominator != nil {
+		q.DeleteNominatedPodIfExists(pod)
 	}
-
+	pInfo := newQueuedPodInfoForLookup(pod)
+	// Cancel any pending active/backoff/unschedulable retry for this pod.
+	_ = q.activeQ.delete(pInfo)
+	_ = q.podBackoffQ.Delete(pInfo)
+	if u := q.unschedulablePods.get(pod); u != nil {
+		q.unschedulablePods.delete(pod)
+	}
 	return nil
 }
 
@@ -204,19 +251,29 @@ func (q *SchedulingQueue) calculateBackoffDuration(podInfo *QueuedPodInfo) time.
 	if podInfo.Attempts == 0 {
 		return 0
 	}
-
-	duration := q.podInitialBackoffDuration
-	for i := 1; i < podInfo.Attempts; i++ {
-		if duration > q.podMaxBackoffDuration-duration {
-			return q.podMaxBackoffDuration
-		}
-		duration += duration
-	}
-	return duration
+	return RetryBackoff(podInfo.Attempts, q.podInitialBackoffDuration, q.podMaxBackoffDuration)
 }
 
 func (q *SchedulingQueue) flushBackoffQCompleted() {
+	q.lock.Lock()
+	defer q.lock.Unlock()
 
+	for {
+		pInfo, ok := q.podBackoffQ.Peek()
+		if !ok {
+			return
+		}
+		if q.isPodBackingoff(pInfo) {
+			return
+		}
+		if _, err := q.podBackoffQ.Pop(); err != nil {
+			return
+		}
+		wasEmpty := q.activeQ.addOrUpdate(pInfo)
+		if wasEmpty {
+			q.activeQ.broadcast()
+		}
+	}
 }
 
 func (q *SchedulingQueue) flushUnschedulablePodsLeftover() {

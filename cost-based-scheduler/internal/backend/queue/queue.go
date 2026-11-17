@@ -207,8 +207,40 @@ func (q *SchedulingQueue) Delete(pod *v1.Pod) error {
 	return nil
 }
 
+// MoveAllToActiveOrBackoffQueue reacts to resource-availability events
+// (node add/update, assigned pod terminal/delete).
+//
+// Backoff policy (recorded for F1 tests / ops):
+//   - Pods already in backoffQ keep waiting for backoff expiry (flushBackoffQCompleted).
+//     Resource events do NOT promote them early — avoids retry storms while still
+//     preserving the real timer backoff path.
+//   - unschedulablePods: if still within backoff window → move to backoffQ;
+//     otherwise → activeQ via moveToActiveQ.
+//   - Duplicates are rejected by moveToActiveQ / heap AddOrUpdate semantics.
 func (q *SchedulingQueue) MoveAllToActiveOrBackoffQueue() {
+	if q == nil {
+		return
+	}
+	q.lock.Lock()
+	defer q.lock.Unlock()
 
+	// Snapshot unschedulable map — moveToActiveQ / backoff updates mutate it.
+	pending := make([]*QueuedPodInfo, 0, len(q.unschedulablePods.podInfoMap))
+	for _, pInfo := range q.unschedulablePods.podInfoMap {
+		pending = append(pending, pInfo)
+	}
+	for _, pInfo := range pending {
+		if pInfo == nil || pInfo.Pod == nil {
+			continue
+		}
+		// Remove from unschedulable before requeue to avoid double membership.
+		q.unschedulablePods.delete(pInfo.Pod)
+		if q.isPodBackingoff(pInfo) {
+			q.podBackoffQ.AddOrUpdate(pInfo)
+			continue
+		}
+		_ = q.moveToActiveQLocked(pInfo, "MoveAllToActiveOrBackoffQueue")
+	}
 }
 
 func (q *SchedulingQueue) Len() int {
@@ -277,16 +309,64 @@ func (q *SchedulingQueue) flushBackoffQCompleted() {
 }
 
 func (q *SchedulingQueue) flushUnschedulablePodsLeftover() {
+	if q == nil {
+		return
+	}
+	q.lock.Lock()
+	defer q.lock.Unlock()
 
-
+	cutoff := q.clock.Now().Add(-q.podMaxInUnschedulablePodsDuration)
+	pending := make([]*QueuedPodInfo, 0, len(q.unschedulablePods.podInfoMap))
+	for _, pInfo := range q.unschedulablePods.podInfoMap {
+		pending = append(pending, pInfo)
+	}
+	for _, pInfo := range pending {
+		if pInfo == nil || pInfo.Pod == nil {
+			continue
+		}
+		// Prefer InitialAttemptTimestamp when present; else Timestamp.
+		anchor := pInfo.Timestamp
+		if pInfo.InitialAttemptTimestamp != nil {
+			anchor = *pInfo.InitialAttemptTimestamp
+		}
+		if anchor.After(cutoff) {
+			continue
+		}
+		q.unschedulablePods.delete(pInfo.Pod)
+		// Aged-out pods that hit attempt cap still get a fresh backoff/active
+		// chance so they do not stall forever in unschedulable.
+		if q.isPodBackingoff(pInfo) {
+			q.podBackoffQ.AddOrUpdate(pInfo)
+			continue
+		}
+		_ = q.moveToActiveQLocked(pInfo, "flushUnschedulablePodsLeftover")
+	}
 }
 
+// moveToActiveQ is the exported wrapper; callers without the queue lock use this.
 func (q *SchedulingQueue) moveToActiveQ(pInfo *QueuedPodInfo, event string) bool {
-	added := false
+	if q == nil || pInfo == nil {
+		return false
+	}
+	q.lock.Lock()
+	defer q.lock.Unlock()
+	return q.moveToActiveQLocked(pInfo, event)
+}
 
+func (q *SchedulingQueue) moveToActiveQLocked(pInfo *QueuedPodInfo, event string) bool {
+	if pInfo == nil || pInfo.Pod == nil {
+		return false
+	}
+	// Ensure not lingering in other queues.
+	_ = q.podBackoffQ.Delete(pInfo)
+	q.unschedulablePods.delete(pInfo.Pod)
 
-
-	return added
+	wasEmpty := q.activeQ.addOrUpdate(pInfo)
+	if wasEmpty {
+		q.activeQ.broadcast()
+	}
+	klog.V(4).InfoS("moved pod to activeQ", "pod", klog.KObj(pInfo.Pod), "event", event)
+	return true
 }
 
 type activeQueue struct {

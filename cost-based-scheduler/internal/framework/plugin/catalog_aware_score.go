@@ -64,12 +64,32 @@ type pendingPlacement struct {
 	enforceOn     bool
 }
 
+// preparedPrediction is one PreScore lookup result, keyed by full catalog lookup key.
+type preparedPrediction struct {
+	pred catalogclient.ProfilePrediction
+	err  error
+}
+
+// attemptCatalogPrep holds PreScore outputs for one scheduling attempt.
+// Payload maps may be dropped by age sweep; whether PreScore *ran* is tracked
+// separately in CatalogAwareScore.prescoreRan and is cleared only by clearPrepared
+// (Commit / fail / cancel). Score must not fall back to HTTP after PreScore ran.
+type attemptCatalogPrep struct {
+	createdAt time.Time
+	byKey     map[string]preparedPrediction
+	nodeKey   map[string]string // nodeName → lookup key fixed at PreScore
+}
+
 // CatalogAwareScore looks up Catalog predictions per candidate node and records
 // exactly one placement_decision per scheduling cycle.
 //
 // In shadow mode the raw score is still computed so that selected_shadow names
 // a real recommendation, but the score returned to the framework is 0, which
 // leaves Bind selection identical to a build without this plugin.
+//
+// PreScore prepares unique full-lookup-key predictions; once PreScore ran for a
+// pod UID, Score never issues HTTP — it reuses prep (including failures) or
+// marks an explicit miss / expired attempt as unevaluated.
 type CatalogAwareScore struct {
 	cache  *utils.Cache
 	client *catalogclient.Client
@@ -77,21 +97,27 @@ type CatalogAwareScore struct {
 	mu       sync.Mutex
 	buffers  map[types.UID]*candidateBuffer
 	pending  map[types.UID]*pendingPlacement
+	prep     map[types.UID]*attemptCatalogPrep
+	// prescoreRan survives prep age-out. Cleared only by clearPrepared.
+	prescoreRan map[types.UID]time.Time
 }
 
 var _ framework.PlacementDecisionCommitter = &CatalogAwareScore{}
 
 var (
+	_ framework.PreScorePlugin  = &CatalogAwareScore{}
 	_ framework.ScorePlugin     = &CatalogAwareScore{}
 	_ framework.ScoreExtensions = &CatalogAwareScore{}
 )
 
 func NewCatalogAwareScore(cache *utils.Cache) *CatalogAwareScore {
 	return &CatalogAwareScore{
-		cache:   cache,
-		client:  catalogclient.NewFromEnv(),
-		buffers: map[types.UID]*candidateBuffer{},
-		pending: map[types.UID]*pendingPlacement{},
+		cache:       cache,
+		client:      catalogclient.NewFromEnv(),
+		buffers:     map[types.UID]*candidateBuffer{},
+		pending:     map[types.UID]*pendingPlacement{},
+		prep:        map[types.UID]*attemptCatalogPrep{},
+		prescoreRan: map[types.UID]time.Time{},
 	}
 }
 
@@ -99,24 +125,143 @@ func (p *CatalogAwareScore) Name() string { return CatalogAwareScoreName }
 
 func (p *CatalogAwareScore) ScoreExtensions() framework.ScoreExtensions { return p }
 
+func lookupKeyFor(wc *workloadcontext.Context) string {
+	if wc == nil {
+		return ""
+	}
+	if wc.EnvironmentKey != "" {
+		return workloadcontext.BuildCatalogLookupKey(wc.EnvironmentKey, wc.Concurrency)
+	}
+	return wc.ProfileKey
+}
+
+func unevaluatedPred(key, reason string) catalogclient.ProfilePrediction {
+	return catalogclient.ProfilePrediction{
+		Found:      false,
+		ProfileKey: key,
+		MatchType:  "profile_not_found",
+		Confidence: workloadcontext.ConfidenceFALLBACK,
+		Reason:     reason,
+	}
+}
+
+// PreScore performs at most one Catalog lookup per unique full lookup key among
+// Filter-passed nodes and stores results for Score (including failures).
+func (p *CatalogAwareScore) PreScore(ctx context.Context, pod *v1.Pod, nodes []*v1.Node) *utils.Status {
+	if p.client == nil || p.client.Mode() == catalogclient.ModeOff || pod == nil {
+		return utils.NewStatus(utils.Success, "")
+	}
+	uid := pod.UID
+	byKey := map[string]preparedPrediction{}
+	nodeKey := map[string]string{}
+	for _, node := range nodes {
+		if node == nil {
+			continue
+		}
+		wc := p.contextForNode(pod, node.Name)
+		key := lookupKeyFor(wc)
+		if key == "" {
+			continue
+		}
+		nodeKey[node.Name] = key
+		if _, seen := byKey[key]; seen {
+			continue
+		}
+		var pred catalogclient.ProfilePrediction
+		var err error
+		if wc.EnvironmentKey != "" {
+			pred, err = p.client.LookupEnvironment(wc.EnvironmentKey, wc.Concurrency)
+		} else {
+			pred, err = p.client.LookupProfile(wc.ProfileKey)
+		}
+		if err != nil {
+			klog.V(2).InfoS("catalog PreScore lookup failed", "err", err, "key", key)
+			pred = unevaluatedPred(key, "prescore_lookup_error")
+		}
+		if pred.MatchType != "exact" {
+			pred.SlaPass = nil
+		}
+		byKey[key] = preparedPrediction{pred: pred, err: err}
+	}
+	now := time.Now()
+	p.mu.Lock()
+	p.prep[uid] = &attemptCatalogPrep{
+		createdAt: now,
+		byKey:     byKey,
+		nodeKey:   nodeKey,
+	}
+	p.prescoreRan[uid] = now
+	p.mu.Unlock()
+	klog.V(4).InfoS("CatalogAwareScore PreScore",
+		"pod", pod.Name, "nodes", len(nodes), "unique_keys", len(byKey))
+	return utils.NewStatus(utils.Success, "")
+}
+
+func (p *CatalogAwareScore) prepSnapshot(uid types.UID) (*attemptCatalogPrep, bool) {
+	if p == nil {
+		return nil, false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	ap, ok := p.prep[uid]
+	return ap, ok
+}
+
+func (p *CatalogAwareScore) preScoreRan(uid types.UID) bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, ok := p.prescoreRan[uid]
+	return ok
+}
+
+func (p *CatalogAwareScore) clearPrepared(uid types.UID) {
+	p.mu.Lock()
+	delete(p.prep, uid)
+	delete(p.prescoreRan, uid)
+	p.mu.Unlock()
+}
+
 func (p *CatalogAwareScore) Score(ctx context.Context, pod *v1.Pod, nodeName string) (int64, *utils.Status) {
 	if p.client == nil || p.client.Mode() == catalogclient.ModeOff {
 		return 0, utils.NewStatus(utils.Success, "")
 	}
 
 	wc := p.contextForNode(pod, nodeName)
+	key := lookupKeyFor(wc)
 	var pred catalogclient.ProfilePrediction
 	var err error
-	if wc.EnvironmentKey != "" {
+
+	ran := p.preScoreRan(pod.UID)
+	ap, hasPrep := p.prepSnapshot(pod.UID)
+	if ran {
+		// PreScore already ran for this attempt: never HTTP from Score,
+		// even if age-sweep dropped the prep payload.
+		if hasPrep && ap != nil {
+			if fixed, has := ap.nodeKey[nodeName]; has {
+				key = fixed
+			}
+			if e, hit := ap.byKey[key]; hit {
+				pred = e.pred
+			} else {
+				klog.V(2).InfoS("catalog Score miss after PreScore", "node", nodeName, "key", key)
+				pred = unevaluatedPred(key, "prescore_key_miss")
+			}
+		} else {
+			klog.V(2).InfoS("catalog Score after PreScore prep expired/cleared", "node", nodeName, "key", key)
+			pred = unevaluatedPred(key, "prescore_attempt_expired")
+		}
+	} else if wc.EnvironmentKey != "" {
+		// Legacy: unit tests that call Score without PreScore.
 		pred, err = p.client.LookupEnvironment(wc.EnvironmentKey, wc.Concurrency)
 	} else {
 		pred, err = p.client.LookupProfile(wc.ProfileKey)
 	}
 	if err != nil {
 		klog.V(2).InfoS("catalog lookup failed", "err", err, "node", nodeName)
-		pred.Found = false
-		pred.MatchType = "profile_not_found"
-		pred.Confidence = workloadcontext.ConfidenceFALLBACK
+		pred = unevaluatedPred(key, "score_lookup_error")
 	}
 	// Unevaluated / non-exact must never be treated as SLA PASS.
 	if pred.MatchType != "exact" {
@@ -311,6 +456,9 @@ func (p *CatalogAwareScore) NormalizeScore(ctx context.Context, pod *v1.Pod, res
 // CommitPlacementDecision posts one placement_decision using the final Bind
 // selection (or empty selected_enforced when selection failed / shadow mode).
 func (p *CatalogAwareScore) CommitPlacementDecision(pod *v1.Pod, selectedHost string, selectErr error) {
+	if pod != nil {
+		defer p.clearPrepared(pod.UID)
+	}
 	if p.client == nil || p.client.Mode() == catalogclient.ModeOff {
 		return
 	}
@@ -467,6 +615,14 @@ func (p *CatalogAwareScore) sweepLocked() {
 		if pend.createdAt.Before(cutoff) {
 			klog.V(2).InfoS("dropping stale catalog pending placement", "podUID", uid)
 			delete(p.pending, uid)
+		}
+	}
+	// Drop aged prep *payload* only. prescoreRan stays until clearPrepared so
+	// Score cannot re-enable HTTP after an active attempt's prep expired (F1).
+	for uid, ap := range p.prep {
+		if ap == nil || ap.createdAt.Before(cutoff) {
+			klog.V(2).InfoS("dropping stale catalog PreScore prep payload", "podUID", uid)
+			delete(p.prep, uid)
 		}
 	}
 }

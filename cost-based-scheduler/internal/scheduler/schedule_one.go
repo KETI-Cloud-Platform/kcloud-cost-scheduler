@@ -100,29 +100,71 @@ func (sched *Scheduler) schedulingCycle(
 	klogger := klog.FromContext(ctx)
 	pod := podInfo.Pod
 
-	if preStatus := fwk.RunPreFilterPlugins(ctx, pod); !preStatus.IsSuccess() {
+	// Attempt ID + timing start before config/PreFilter (R2): always have an ID
+	// and attempt_to_terminal_ms even when required-checks config fails.
+	attempt, meta, timing, beginErr := sched.beginAttempt(pod)
+	sched.recordSchedulingAttempt(meta)
+	if beginErr != nil {
+		timing.markTerminal("fail_config", "required_checks_config")
+		sched.recordPhaseTiming(meta.AttemptID, timing)
+		return ScheduleResult{AttemptID: meta.AttemptID, Timing: timing, nominatingInfo: clearNominatedNode}, podInfo, utils.AsStatus(beginErr)
+	}
+	ctx = utils.WithAttempt(ctx, attempt)
+
+	timing.PreFilterStart = time.Now()
+	preStatus := fwk.RunPreFilterPlugins(ctx, pod)
+	timing.PreFilterEnd = time.Now()
+	if !preStatus.IsSuccess() {
 		logger.Warn(fmt.Sprintf("[schedule] PreFilter 실패: pod=%s/%s reason=%s",
 			pod.Namespace, pod.Name, preStatus.Message()))
-		return ScheduleResult{nominatingInfo: clearNominatedNode}, podInfo,
+		timing.markTerminal("fail_prefilter", "prefilter")
+		sched.recordPhaseTiming(meta.AttemptID, timing)
+		return ScheduleResult{AttemptID: meta.AttemptID, Timing: timing, nominatingInfo: clearNominatedNode}, podInfo,
 			utils.NewStatus(utils.Unschedulable).WithError(fmt.Errorf("%s", preStatus.Message()))
 	}
 
 	scheduleResult, err := sched.schedulePod(ctx, fwk, pod)
+	if scheduleResult.Timing == nil {
+		scheduleResult.Timing = timing
+	} else {
+		// Preserve PreFilter clocks recorded above; keep monotonic start.
+		scheduleResult.Timing.AttemptStartedAt = timing.AttemptStartedAt
+		scheduleResult.Timing.PreFilterStart = timing.PreFilterStart
+		scheduleResult.Timing.PreFilterEnd = timing.PreFilterEnd
+	}
+	if scheduleResult.AttemptID == "" {
+		scheduleResult.AttemptID = meta.AttemptID
+	}
 	if err != nil {
 		logger.Warn(fmt.Sprintf("[schedule] 노드 선택 실패: pod=%s/%s err=%v",
 			pod.Namespace, pod.Name, err))
+		if scheduleResult.Timing != nil && scheduleResult.Timing.EventRole != "terminal" {
+			outcome := scheduleResult.Timing.Outcome
+			stage := scheduleResult.Timing.FailStage
+			if outcome == "" || outcome == "select_ok" {
+				outcome = "fail_schedule"
+				stage = "schedule"
+			}
+			scheduleResult.Timing.markTerminal(outcome, stage)
+		}
+		sched.recordPhaseTiming(scheduleResult.AttemptID, scheduleResult.Timing)
 		if err == ErrNoNodesAvailable {
-			return ScheduleResult{nominatingInfo: clearNominatedNode}, podInfo,
+			return ScheduleResult{AttemptID: scheduleResult.AttemptID, Timing: scheduleResult.Timing, nominatingInfo: clearNominatedNode, PluginResultMap: scheduleResult.PluginResultMap}, podInfo,
 				utils.NewStatus(utils.UnschedulableAndUnresolvable).WithError(err)
 		}
-		return ScheduleResult{}, podInfo, utils.NewStatus(utils.Unschedulable).WithError(err)
+		scheduleResult.nominatingInfo = clearNominatedNode
+		return scheduleResult, podInfo, utils.NewStatus(utils.Unschedulable).WithError(err)
 	}
 
 	assumedPodInfo := podInfo.DeepCopy()
 	assumedPod := assumedPodInfo.Pod
 
 	if err = sched.assume(klogger, assumedPod, scheduleResult.SuggestedHost); err != nil {
-		return ScheduleResult{nominatingInfo: clearNominatedNode}, assumedPodInfo, utils.AsStatus(err)
+		if scheduleResult.Timing != nil {
+			scheduleResult.Timing.markTerminal("fail_assume", "assume")
+			sched.recordPhaseTiming(scheduleResult.AttemptID, scheduleResult.Timing)
+		}
+		return ScheduleResult{AttemptID: scheduleResult.AttemptID, Timing: scheduleResult.Timing, nominatingInfo: clearNominatedNode}, assumedPodInfo, utils.AsStatus(err)
 	}
 
 	return scheduleResult, assumedPodInfo, nil
@@ -149,14 +191,46 @@ func (sched *Scheduler) bindingCycle(
 	start time.Time) *utils.Status {
 
 	assumedPod := assumedPodInfo.Pod
+	if scheduleResult.Timing == nil {
+		// Fallback: prefer ScheduleOne start (monotonic) over wall UTC.
+		at := start
+		if at.IsZero() {
+			at = time.Now()
+		}
+		scheduleResult.Timing = &PhaseTiming{AttemptStartedAt: at}
+	}
+	scheduleResult.Timing.BindStart = time.Now()
+
+	queueDone := func() {
+		if sched.SchedulingQueue != nil {
+			sched.SchedulingQueue.Done(assumedPod.UID)
+		}
+	}
+	queueUnsched := func() {
+		if sched.SchedulingQueue != nil {
+			sched.SchedulingQueue.AddUnschedulable(assumedPodInfo)
+		}
+	}
+
+	finishBind := func(ok bool, detail, failStage string) {
+		scheduleResult.Timing.BindEnd = time.Now()
+		scheduleResult.Timing.SuggestedHost = scheduleResult.SuggestedHost
+		if ok {
+			scheduleResult.Timing.markTerminal("success", "")
+		} else {
+			scheduleResult.Timing.markTerminal("fail_bind", failStage)
+		}
+		sched.recordBindOutcome(scheduleResult.AttemptID, assumedPod, scheduleResult.SuggestedHost, ok, detail)
+		sched.recordPhaseTiming(scheduleResult.AttemptID, scheduleResult.Timing)
+	}
 
 	if permitStatus := fwk.RunPermitPlugins(ctx, assumedPod, scheduleResult.SuggestedHost); !permitStatus.IsSuccess() {
 		logger.Warn(fmt.Sprintf("[bind] Permit 거부, 재큐(backoff): pod=%s/%s reason=%s",
 			assumedPod.Namespace, assumedPod.Name, permitStatus.Message()))
 		_ = sched.Cache.RemovePod(assumedPod)
-		sched.SchedulingQueue.Done(assumedPod.UID)
-		sched.SchedulingQueue.AddUnschedulable(assumedPodInfo)
-		sched.recordBindOutcome(scheduleResult.AttemptID, assumedPod, scheduleResult.SuggestedHost, false, permitStatus.Message())
+		queueDone()
+		queueUnsched()
+		finishBind(false, permitStatus.Message(), "permit")
 		return utils.NewStatus(utils.Unschedulable, permitStatus.Message())
 	}
 
@@ -168,17 +242,17 @@ func (sched *Scheduler) bindingCycle(
 			logger.Error(fmt.Sprintf("[HAMi] bind 실패, 재큐(backoff): pod=%s/%s err=%v",
 				assumedPod.Namespace, assumedPod.Name, err), err)
 			_ = sched.Cache.RemovePod(assumedPod)
-			sched.SchedulingQueue.Done(assumedPod.UID)
-			sched.SchedulingQueue.AddUnschedulable(assumedPodInfo)
-			sched.recordBindOutcome(scheduleResult.AttemptID, assumedPod, scheduleResult.SuggestedHost, false, err.Error())
+			queueDone()
+			queueUnsched()
+			finishBind(false, err.Error(), "hami_bind")
 			return utils.NewStatus(utils.Error, err.Error())
 		}
 
 		logger.Info(fmt.Sprintf("[HAMi] bind 완료: pod=%s/%s node=%s",
 			assumedPod.Namespace, assumedPod.Name, scheduleResult.SuggestedHost))
 		sched.finishBinding(fwk, assumedPod, scheduleResult.SuggestedHost)
-		sched.SchedulingQueue.Done(assumedPod.UID)
-		sched.recordBindOutcome(scheduleResult.AttemptID, assumedPod, scheduleResult.SuggestedHost, true, "")
+		queueDone()
+		finishBind(true, "", "")
 		return nil
 	}
 
@@ -186,20 +260,75 @@ func (sched *Scheduler) bindingCycle(
 		logger.Warn(fmt.Sprintf("[bind] DefaultBinder 실패, 재큐(backoff): pod=%s/%s node=%s err=%v",
 			assumedPod.Namespace, assumedPod.Name, scheduleResult.SuggestedHost, err))
 		_ = sched.Cache.RemovePod(assumedPod)
-		sched.SchedulingQueue.Done(assumedPod.UID)
-		sched.SchedulingQueue.AddUnschedulable(assumedPodInfo)
-		sched.recordBindOutcome(scheduleResult.AttemptID, assumedPod, scheduleResult.SuggestedHost, false, err.Error())
+		queueDone()
+		queueUnsched()
+		finishBind(false, err.Error(), "default_binder")
 		return utils.NewStatus(utils.Error, err.Error())
 	}
 
-	sched.SchedulingQueue.Done(assumedPod.UID)
-	sched.recordBindOutcome(scheduleResult.AttemptID, assumedPod, scheduleResult.SuggestedHost, true, "")
+	queueDone()
+	finishBind(true, "", "")
 	return nil
 }
 
+func (sched *Scheduler) beginAttempt(pod *v1.Pod) (*utils.AttemptState, placementchecks.AttemptMeta, *PhaseTiming, error) {
+	// ID + monotonic start before config load so fail_config still has terminal duration.
+	started := time.Now()
+	meta := placementchecks.AttemptMeta{
+		AttemptID:    uuid.NewString(),
+		PodNamespace: pod.Namespace,
+		PodName:      pod.Name,
+		PodUID:       string(pod.UID),
+		StartedAt:    started,
+	}
+	timing := &PhaseTiming{AttemptStartedAt: started}
+	cfg, cfgErr := sched.resolveRequiredChecksConfig()
+	if cfgErr != nil {
+		return nil, meta, timing, fmt.Errorf("required-checks config: %w", cfgErr)
+	}
+	meta.ConfigVersion = cfg.Version
+	snap := placementchecks.Snapshot{ID: uuid.NewString(), TakenAt: started, Nodes: map[string]placementchecks.NodeTelemetry{}}
+	if sched.PlacementStore != nil {
+		snap = sched.PlacementStore.Snapshot()
+		meta.SnapshotID = snap.ID
+	}
+	return utils.NewAttemptState(meta, snap, placementchecks.ParseRequest(pod), cfg), meta, timing, nil
+}
+
 func (sched *Scheduler) schedulePod(ctx context.Context, fwk framework.Framework, pod *v1.Pod) (result ScheduleResult, err error) {
+	scheduleResult := ScheduleResult{Timing: &PhaseTiming{}}
+	timing := scheduleResult.Timing
+
+	// Reuse attempt prepared before PreFilter when present (ScheduleOne path).
+	// Direct schedulePod tests still create a fresh attempt here.
+	attempt := utils.AttemptFrom(ctx)
+	var meta placementchecks.AttemptMeta
+	if attempt != nil {
+		meta = attempt.Meta
+		timing.AttemptStartedAt = meta.StartedAt
+		scheduleResult.AttemptID = meta.AttemptID
+	} else {
+		var beginErr error
+		var begunTiming *PhaseTiming
+		attempt, meta, begunTiming, beginErr = sched.beginAttempt(pod)
+		if begunTiming != nil {
+			timing = begunTiming
+			scheduleResult.Timing = timing
+		}
+		scheduleResult.AttemptID = meta.AttemptID
+		if beginErr != nil {
+			timing.markTerminal("fail_config", "required_checks_config")
+			sched.recordSchedulingAttempt(meta)
+			sched.recordPhaseTiming(meta.AttemptID, timing)
+			return scheduleResult, beginErr
+		}
+		ctx = utils.WithAttempt(ctx, attempt)
+		sched.recordSchedulingAttempt(meta)
+	}
+
 	if sched.Cache.NodeCount() == 0 {
-		return result, ErrNoNodesAvailable
+		timing.markTerminal("fail_no_nodes", "cache")
+		return scheduleResult, ErrNoNodesAvailable
 	}
 
 	if hasGPURequest(pod) {
@@ -208,35 +337,21 @@ func (sched *Scheduler) schedulePod(ctx context.Context, fwk framework.Framework
 
 	nodes := sched.Cache.Nodes()
 	if len(nodes) == 0 {
-		return result, ErrNoNodesAvailable
+		timing.markTerminal("fail_no_nodes", "cache")
+		return scheduleResult, ErrNoNodesAvailable
 	}
-	scheduleResult := NewScheduleResult(nodes)
+	base := NewScheduleResult(nodes)
+	scheduleResult.PluginResultMap = base.PluginResultMap
+	scheduleResult.FeasibleNodes = base.FeasibleNodes
 
-	cfg, cfgErr := sched.resolveRequiredChecksConfig()
-	if cfgErr != nil {
-		return scheduleResult, fmt.Errorf("required-checks config: %w", cfgErr)
-	}
-	meta := placementchecks.AttemptMeta{
-		AttemptID:     uuid.NewString(),
-		PodNamespace:  pod.Namespace,
-		PodName:       pod.Name,
-		PodUID:        string(pod.UID),
-		StartedAt:     time.Now().UTC(),
-		ConfigVersion: cfg.Version,
-	}
-	scheduleResult.AttemptID = meta.AttemptID
-	snap := placementchecks.Snapshot{ID: uuid.NewString(), TakenAt: meta.StartedAt, Nodes: map[string]placementchecks.NodeTelemetry{}}
-	if sched.PlacementStore != nil {
-		snap = sched.PlacementStore.Snapshot()
-		meta.SnapshotID = snap.ID
-	}
-	attempt := utils.NewAttemptState(meta, snap, placementchecks.ParseRequest(pod), cfg)
-	ctx = utils.WithAttempt(ctx, attempt)
-	sched.recordSchedulingAttempt(meta)
-
+	timing.FilterStart = time.Now()
 	if err = sched.runFilterPlugin(ctx, fwk, pod, &scheduleResult); err != nil {
+		timing.FilterEnd = time.Now()
+		timing.Outcome = "fail_filter"
+		timing.FailStage = "filter"
 		return scheduleResult, err
 	}
+	timing.FilterEnd = time.Now()
 
 	if hasGPURequest(pod) && hasHAMiManagedCandidate(sched, scheduleResult.PluginResultMap) {
 		feasibleNodes := make([]*v1.Node, 0)
@@ -249,7 +364,9 @@ func (sched *Scheduler) schedulePod(ctx context.Context, fwk framework.Framework
 		}
 
 		if len(feasibleNodes) > 0 {
+			timing.HamiStart = time.Now()
 			hamiFilteredNodes, hamiErr := sched.hamiClient.Filter(pod, feasibleNodes)
+			timing.HamiEnd = time.Now()
 			if hamiErr != nil {
 				// Preserve prior candidates; record communication failure without inventing PASS.
 				for nodeName, pr := range scheduleResult.PluginResultMap {
@@ -299,6 +416,9 @@ func (sched *Scheduler) schedulePod(ctx context.Context, fwk framework.Framework
 
 	// Pending 사유를 남길 수 있도록 실패 시에도 Node별 Filter 결과를 함께 돌려준다.
 	if scheduleResult.FeasibleNodes == 0 {
+		timing.Outcome = "fail_no_feasible"
+		timing.FailStage = "filter"
+		// Terminal end is stamped by schedulingCycle (or caller) via markTerminal.
 		return scheduleResult, fmt.Errorf("대상 Pod %s/%s를 배치할 수 있는 노드가 없음: 모든 노드 필터링됨",
 			pod.Namespace, pod.Name)
 	}
@@ -307,11 +427,37 @@ func (sched *Scheduler) schedulePod(ctx context.Context, fwk framework.Framework
 	// CatalogAwareScore (shadow) must still look up Catalog and record
 	// placement_decision; skipping Score on the single-node fast path hid all
 	// Catalog E2E evidence on this cluster (one accelerator node).
-	if err = sched.runScorePlugin(ctx, fwk, pod, &scheduleResult); err != nil {
+	// PreScore prepares unique full-lookup-key Profiles; Score reads shared state.
+	timing.PreScoreStart = time.Now()
+	if err = sched.runPreScorePlugin(ctx, fwk, pod, &scheduleResult); err != nil {
+		timing.PreScoreEnd = time.Now()
+		timing.Outcome = "fail_prescore"
+		timing.FailStage = "prescore"
 		return scheduleResult, err
 	}
+	timing.PreScoreEnd = time.Now()
 
+	timing.ScoreStart = time.Now()
+	if err = sched.runScorePlugin(ctx, fwk, pod, &scheduleResult); err != nil {
+		timing.ScoreEnd = time.Now()
+		timing.Outcome = "fail_score"
+		timing.FailStage = "score"
+		return scheduleResult, err
+	}
+	timing.ScoreEnd = time.Now()
+
+	timing.SelectStart = time.Now()
 	err = sched.selectResource(fwk, pod, &scheduleResult)
+	timing.SelectEnd = time.Now()
+	timing.SuggestedHost = scheduleResult.SuggestedHost
+	if err != nil {
+		timing.Outcome = "fail_select"
+		timing.FailStage = "select"
+		return scheduleResult, err
+	}
+	// Judgment interim only — Bind path emits terminal phase_timing.
+	timing.markInterimSelect()
+	sched.recordPhaseTiming(scheduleResult.AttemptID, timing)
 	return scheduleResult, err
 }
 
@@ -369,11 +515,14 @@ func (sched *Scheduler) recordSchedulingAttempt(meta placementchecks.AttemptMeta
 		Kind:      decisionrecorder.KindSchedulingAttempt,
 		AttemptID: meta.AttemptID,
 		Payload: map[string]any{
-			"pod_namespace":  meta.PodNamespace,
-			"pod_name":       meta.PodName,
-			"pod_uid":        meta.PodUID,
-			"snapshot_id":    meta.SnapshotID,
-			"config_version": meta.ConfigVersion,
+			"pod_namespace":      meta.PodNamespace,
+			"pod_name":           meta.PodName,
+			"pod_uid":            meta.PodUID,
+			"snapshot_id":        meta.SnapshotID,
+			"config_version":     meta.ConfigVersion,
+			"attempt_started_at": meta.StartedAt.UTC().Format(time.RFC3339Nano),
+			"metric_class":       "verification_not_official_kpi7",
+			"retry_note":         "each scheduling try gets a new attempt_id; join retries by pod_uid",
 		},
 	})
 }
@@ -408,6 +557,7 @@ func (sched *Scheduler) recordBindOutcome(attemptID string, pod *v1.Pod, nodeNam
 		"pod_name":      pod.Name,
 		"pod_uid":       string(pod.UID),
 		"success":       ok,
+		"metric_class":  "verification_not_official_kpi7",
 	}
 	if detail != "" {
 		payload["detail"] = detail
@@ -420,9 +570,7 @@ func (sched *Scheduler) recordBindOutcome(attemptID string, pod *v1.Pod, nodeNam
 	})
 }
 
-func (sched *Scheduler) runScorePlugin(ctx context.Context, fwk framework.Framework, pod *v1.Pod, scheduleResult *ScheduleResult) error {
-	klogger := klog.FromContext(ctx)
-
+func (sched *Scheduler) feasibleNodesForScore(scheduleResult *ScheduleResult) []*v1.Node {
 	feasibleNodes := make([]*v1.Node, 0)
 	for nodeName, pr := range scheduleResult.PluginResultMap {
 		if !pr.IsFiltered {
@@ -431,6 +579,25 @@ func (sched *Scheduler) runScorePlugin(ctx context.Context, fwk framework.Framew
 			}
 		}
 	}
+	return feasibleNodes
+}
+
+func (sched *Scheduler) runPreScorePlugin(ctx context.Context, fwk framework.Framework, pod *v1.Pod, scheduleResult *ScheduleResult) error {
+	feasibleNodes := sched.feasibleNodesForScore(scheduleResult)
+	if len(feasibleNodes) == 0 {
+		return fmt.Errorf("PreScore를 수행할 수 있는 노드가 없음")
+	}
+	status := fwk.RunPreScorePlugins(ctx, pod, feasibleNodes)
+	if !status.IsSuccess() {
+		return fmt.Errorf("PreScore 실패: %s", status.Message())
+	}
+	return nil
+}
+
+func (sched *Scheduler) runScorePlugin(ctx context.Context, fwk framework.Framework, pod *v1.Pod, scheduleResult *ScheduleResult) error {
+	klogger := klog.FromContext(ctx)
+
+	feasibleNodes := sched.feasibleNodesForScore(scheduleResult)
 
 	if len(feasibleNodes) == 0 {
 		return fmt.Errorf("스코어링을 수행할 수 있는 노드가 없음")

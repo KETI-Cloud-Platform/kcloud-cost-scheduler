@@ -276,7 +276,13 @@ func assignedPod(pod *v1.Pod) bool {
 	return len(pod.Spec.NodeName) != 0
 }
 
+// SchedulerName is the schedulerName this scheduler serves.
+const SchedulerName = "keti-cost-scheduler"
+
+// legacySchedulerName is accepted until existing manifests are migrated.
+const legacySchedulerName = "cost-based-scheduler"
+
 func responsibleForPod(pod *v1.Pod) bool {
-	responsibleForPod := (pod.Spec.SchedulerName == "cost-based-scheduler")
-	return responsibleForPod
+	name := pod.Spec.SchedulerName
+	return name == SchedulerName || name == legacySchedulerName
 }

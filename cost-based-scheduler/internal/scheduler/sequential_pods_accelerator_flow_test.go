@@ -195,7 +195,7 @@ func newSequentialFlowPod(name string) *v1.Pod {
 			},
 		},
 		Spec: v1.PodSpec{
-			SchedulerName: "cost-based-scheduler",
+			SchedulerName: "keti-cost-scheduler",
 			Containers: []v1.Container{{
 				Name: "worker",
 				Resources: v1.ResourceRequirements{Requests: v1.ResourceList{

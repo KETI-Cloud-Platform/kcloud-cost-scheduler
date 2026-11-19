@@ -4,7 +4,7 @@ metadata:
   name: accelerator-config
   namespace: kcp-control-plane
   labels:
-    app: cost-based-scheduler
+    app: keti-cost-scheduler
     experiment.kcloud.io/id: "2026-09-17-shadow-e2e"
 data:
   accelerator-config.yaml: |

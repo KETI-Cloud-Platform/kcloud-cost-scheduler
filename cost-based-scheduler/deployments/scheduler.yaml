@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: cost-based-scheduler
+  name: keti-cost-scheduler
   namespace: kcloud-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -25,7 +25,7 @@ metadata:
   name: cost-based-scheduler-binding
 subjects:
 - kind: ServiceAccount
-  name: cost-based-scheduler
+  name: keti-cost-scheduler
   namespace: kcloud-system
 roleRef:
   kind: ClusterRole
@@ -35,19 +35,19 @@ roleRef:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: cost-based-scheduler
+  name: keti-cost-scheduler
   namespace: kcloud-system
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: cost-based-scheduler
+      app: keti-cost-scheduler
   template:
     metadata:
       labels:
-        app: cost-based-scheduler
+        app: keti-cost-scheduler
     spec:
-      serviceAccountName: cost-based-scheduler
+      serviceAccountName: keti-cost-scheduler
       containers:
       - name: scheduler
         image: kcloud-cost-scheduler:latest

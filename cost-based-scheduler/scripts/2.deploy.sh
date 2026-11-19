@@ -28,7 +28,7 @@ elif [ "$1" == "create" ] || [ "$1" == "a" ]; then
         echo ""
         echo "Checking pod status..."
         sleep 3
-        kubectl get pods -n kcp-control-plane -l app=cost-based-scheduler
+        kubectl get pods -n kcp-control-plane -l app=keti-cost-scheduler
     else
         echo "Error: Deployment create failed"
         exit 1

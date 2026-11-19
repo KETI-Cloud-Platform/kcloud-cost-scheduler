@@ -4,9 +4,9 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
-    app: cost-based-scheduler
+    app: keti-cost-scheduler
     experiment.kcloud.io/id: "2026-09-17-shadow-e2e"
-  name: cost-based-scheduler
+  name: keti-cost-scheduler
   namespace: kcp-control-plane
   annotations:
     experiment.kcloud.io/image-digest: "__DIGEST__"
@@ -14,15 +14,15 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      app: cost-based-scheduler
+      app: keti-cost-scheduler
   template:
     metadata:
       labels:
-        app: cost-based-scheduler
+        app: keti-cost-scheduler
         experiment.kcloud.io/id: "2026-09-17-shadow-e2e"
-      name: cost-based-scheduler
+      name: keti-cost-scheduler
     spec:
-      serviceAccountName: cost-based-scheduler
+      serviceAccountName: keti-cost-scheduler
       nodeSelector:
         kubernetes.io/hostname: gpu-node-01
       tolerations:
@@ -30,7 +30,7 @@ spec:
         operator: Exists
         effect: NoSchedule
       containers:
-        - name: cost-based-scheduler
+        - name: keti-cost-scheduler
           image: __IMAGE__
           imagePullPolicy: Always
           env:

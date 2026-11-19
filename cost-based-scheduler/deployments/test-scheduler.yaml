@@ -30,7 +30,7 @@ spec:
       name: test-cost-based-scheduler
     spec:
       containers:
-      - image: ketidevit2/cost-based-scheduler:0.3.0
+      - image: ketidevit2/keti-cost-scheduler:0.3.0
         imagePullPolicy: Always
         name: test-cost-based-scheduler
         resources:
@@ -46,8 +46,8 @@ spec:
       restartPolicy: Always
       schedulerName: default-scheduler
       securityContext: {}
-      serviceAccount: cost-based-scheduler
-      serviceAccountName: cost-based-scheduler
+      serviceAccount: keti-cost-scheduler
+      serviceAccountName: keti-cost-scheduler
       terminationGracePeriodSeconds: 30
 status:
   availableReplicas: 1

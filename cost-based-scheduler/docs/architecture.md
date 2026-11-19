@@ -509,19 +509,19 @@ accelerators:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: cost-based-scheduler
+  name: keti-cost-scheduler
   namespace: kube-system
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: cost-based-scheduler
+      app: keti-cost-scheduler
   template:
     spec:
-      serviceAccountName: cost-based-scheduler
+      serviceAccountName: keti-cost-scheduler
       containers:
       - name: scheduler
-        image: cost-based-scheduler:latest
+        image: keti-cost-scheduler:latest
         env:
         - name: ACCELERATOR_CONFIG_PATH
           value: /etc/scheduler/accelerator-config.yaml
@@ -549,7 +549,7 @@ metadata:
   annotations:
     scheduler.affinity-mode: preferred
 spec:
-  schedulerName: cost-based-scheduler  # 커스텀 스케줄러 사용
+  schedulerName: keti-cost-scheduler  # 커스텀 스케줄러 사용
   containers:
   - name: inference
     image: my-inference-image

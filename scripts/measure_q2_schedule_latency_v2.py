@@ -59,7 +59,7 @@ def sched_deploy_env() -> dict[str, str]:
             "kcp-control-plane",
             "get",
             "deploy",
-            "cost-based-scheduler",
+            "keti-cost-scheduler",
             "-o",
             "json",
         ]
@@ -88,7 +88,7 @@ def sched_pod_snapshot() -> dict[str, Any]:
             "get",
             "pods",
             "-l",
-            "app=cost-based-scheduler",
+            "app=keti-cost-scheduler",
             "-o",
             "json",
         ]
@@ -124,7 +124,7 @@ def set_sched_mode(mode: str) -> dict[str, Any]:
                 "spec": {
                     "containers": [
                         {
-                            "name": "cost-based-scheduler",
+                            "name": "keti-cost-scheduler",
                             "env": [{"name": "SCHED_CATALOG_MODE", "value": mode}],
                         }
                     ]
@@ -139,7 +139,7 @@ def set_sched_mode(mode: str) -> dict[str, Any]:
             "kcp-control-plane",
             "patch",
             "deploy",
-            "cost-based-scheduler",
+            "keti-cost-scheduler",
             "--type=strategic",
             "-p",
             json.dumps(patch),
@@ -152,7 +152,7 @@ def set_sched_mode(mode: str) -> dict[str, Any]:
             "kcp-control-plane",
             "rollout",
             "status",
-            "deploy/cost-based-scheduler",
+            "deploy/keti-cost-scheduler",
             "--timeout=180s",
         ]
     )
@@ -484,7 +484,7 @@ def run_trial(
         row["submit_to_assign_watch_ms"] = None
 
     # scheduler / catalog log excerpts for this pod
-    if scheduler_name == "cost-based-scheduler":
+    if scheduler_name == "keti-cost-scheduler":
         snap = sched_pod_snapshot()
         row["scheduler_pod"] = snap["pods"][0] if snap["pods"] else None
         if snap["pods"]:
@@ -591,8 +591,8 @@ def main() -> int:
     # arm configs depend on mode; we switch mode when arm needs it
     arm_sched = {
         "A": "default-scheduler",
-        "B0": "cost-based-scheduler",
-        "B1": "cost-based-scheduler",
+        "B0": "keti-cost-scheduler",
+        "B1": "keti-cost-scheduler",
     }
     arm_mode = {"A": None, "B0": "off", "B1": "shadow"}  # None = leave as-is for A
 

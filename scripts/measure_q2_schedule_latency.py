@@ -2,8 +2,8 @@
 """Q2 scheduling latency: submit → first observed non-empty spec.nodeName (monotonic ms).
 
 A  = schedulerName default-scheduler (or empty → default)
-B0 = cost-based-scheduler while SCHED_CATALOG_MODE=off
-B1 = cost-based-scheduler while SCHED_CATALOG_MODE=shadow
+B0 = keti-cost-scheduler while SCHED_CATALOG_MODE=off
+B1 = keti-cost-scheduler while SCHED_CATALOG_MODE=shadow
 
 Does not use creationTimestamp/lastTransitionTime for ms math.
 Does not kill foreign workloads. Prefer --no-gpu when host GPU is occupied outside k8s.
@@ -143,7 +143,7 @@ def get_sched_mode() -> str:
             "kcp-control-plane",
             "get",
             "deploy",
-            "cost-based-scheduler",
+            "keti-cost-scheduler",
             "-o",
             "json",
         ]
@@ -163,7 +163,7 @@ def set_sched_mode(mode: str) -> None:
                 "spec": {
                     "containers": [
                         {
-                            "name": "cost-based-scheduler",
+                            "name": "keti-cost-scheduler",
                             "env": [{"name": "SCHED_CATALOG_MODE", "value": mode}],
                         }
                     ]
@@ -178,7 +178,7 @@ def set_sched_mode(mode: str) -> None:
             "kcp-control-plane",
             "patch",
             "deploy",
-            "cost-based-scheduler",
+            "keti-cost-scheduler",
             "--type=strategic",
             "-p",
             json.dumps(patch),
@@ -191,7 +191,7 @@ def set_sched_mode(mode: str) -> None:
             "kcp-control-plane",
             "rollout",
             "status",
-            "deploy/cost-based-scheduler",
+            "deploy/keti-cost-scheduler",
             "--timeout=180s",
         ]
     )
@@ -322,12 +322,12 @@ def main() -> int:
                 sched = "default-scheduler"
                 # no mode change
             elif arm == "B0":
-                sched = "cost-based-scheduler"
+                sched = "keti-cost-scheduler"
                 if not args.allow_mode_switch:
                     raise SystemExit("B0 requires --allow-mode-switch to set SCHED_CATALOG_MODE=off")
                 set_sched_mode("off")
             elif arm == "B1":
-                sched = "cost-based-scheduler"
+                sched = "keti-cost-scheduler"
                 if args.allow_mode_switch and get_sched_mode() != "shadow":
                     set_sched_mode("shadow")
             else:

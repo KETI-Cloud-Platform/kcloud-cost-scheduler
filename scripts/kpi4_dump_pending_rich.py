@@ -100,7 +100,7 @@ def main() -> None:
 
     # scheduler pod logs (best-effort)
     sched_logs = {}
-    for app in ("cost-based-scheduler",):
+    for app in ("keti-cost-scheduler",):
         try:
             raw = subprocess.check_output(
                 [

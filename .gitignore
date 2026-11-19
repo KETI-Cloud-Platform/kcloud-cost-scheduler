@@ -70,3 +70,7 @@ charts/*.tgz
 # Container runtime files
 *.pid
 *.sock
+
+# Python
+__pycache__/
+*.pyc

@@ -119,6 +119,23 @@ func (f *frameworkImpl) RunFilterPlugins(ctx context.Context, pod *v1.Pod, nodeI
 	return result
 }
 
+// RunPreScorePlugins runs Score plugins that also implement PreScorePlugin.
+// Catalog lookups happen here so Score can stay network-free for prepared keys.
+func (f *frameworkImpl) RunPreScorePlugins(ctx context.Context, pod *v1.Pod, nodes []*v1.Node) *utils.Status {
+	for _, plugin := range f.scorePlugins {
+		ps, ok := plugin.(PreScorePlugin)
+		if !ok {
+			continue
+		}
+		if status := ps.PreScore(ctx, pod, nodes); !status.IsSuccess() {
+			logger.Info(fmt.Sprintf("[PreScore] pod=%s/%s plugin=%s failed: %s",
+				pod.Namespace, pod.Name, plugin.Name(), status.Message()))
+			return status
+		}
+	}
+	return utils.NewStatus(utils.Success, "")
+}
+
 func (f *frameworkImpl) RunScorePlugins(ctx context.Context, pod *v1.Pod, nodes []*v1.Node) (utils.PluginResultMap, *utils.Status) {
 	result := utils.PluginResultMap{}
 

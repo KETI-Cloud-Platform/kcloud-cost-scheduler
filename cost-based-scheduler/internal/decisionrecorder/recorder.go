@@ -16,6 +16,10 @@ const (
 	KindCandidateCheckResult = "candidate_check_result"
 	KindPlacementDecision    = "placement_decision"
 	KindBindOutcome          = "bind_outcome"
+	// KindPhaseTiming records attempt→select and Bind path clocks for KPI7
+	// baseline verification. Not an official KPI7 claim until default-scheduler
+	// metric boundaries are confirmed equal.
+	KindPhaseTiming = "phase_timing"
 )
 
 // Event is one JSONL line.

@@ -160,7 +160,7 @@ spec:
         furiosa.ai/warboy: "1"
 EOF
 
-assert_equal "Pod scheduler" "cost-based-scheduler" \
+assert_equal "Pod scheduler" "keti-cost-scheduler" \
     "$(kubectl -n "${TEST_NAMESPACE}" get pod npu-annotation-e2e-pod -o jsonpath='{.spec.schedulerName}')"
 assert_equal "Pod accelerator type" "npu" \
     "$(annotation_value pod npu-annotation-e2e-pod sched.ai/acc-type)"

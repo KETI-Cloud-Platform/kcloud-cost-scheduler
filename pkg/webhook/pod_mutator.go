@@ -77,7 +77,7 @@ func (m *PodMutator) Handle(ctx context.Context, req admission.Request) admissio
 		return admission.Allowed("No optimization needed")
 	}
 
-	// Always ensure the pod is routed to our cost-based-scheduler and tagged with basic intents
+	// Always ensure the pod is routed to our keti-cost-scheduler and tagged with basic intents
 	originalPod := pod.DeepCopy()
 	if err := m.propagateKueueWorkloadAnnotations(ctx, pod); err != nil {
 		// Prediction propagation is best-effort at admission time. Actual resource
@@ -603,7 +603,7 @@ func (m *PodMutator) InjectDecoder(d admission.Decoder) error {
 	return nil
 }
 
-// applyCostSchedulerAnnotations injects necessary annotations for the cost-based-scheduler
+// applyCostSchedulerAnnotations injects necessary annotations for the keti-cost-scheduler
 // including intent, accelerator types, scale, and preferences.
 func (m *PodMutator) applyCostSchedulerAnnotations(pod *corev1.Pod) {
 	if pod.Annotations == nil {
@@ -611,7 +611,7 @@ func (m *PodMutator) applyCostSchedulerAnnotations(pod *corev1.Pod) {
 	}
 
 	// 1. Force route to our scheduler engine
-	pod.Spec.SchedulerName = "cost-based-scheduler"
+	pod.Spec.SchedulerName = "keti-cost-scheduler"
 
 	// 2. Extract the actual Pod resource composition. Workload-level hints are
 	// copied first, but these physical resource fields are re-derived per Pod so

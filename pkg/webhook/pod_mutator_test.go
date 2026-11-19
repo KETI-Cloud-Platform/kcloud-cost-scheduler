@@ -20,8 +20,8 @@ func TestPodMutator_GPUTraining(t *testing.T) {
 
 	mutator.applyCostSchedulerAnnotations(pod)
 
-	if pod.Spec.SchedulerName != "cost-based-scheduler" {
-		t.Errorf("schedulerName = %q, want %q", pod.Spec.SchedulerName, "cost-based-scheduler")
+	if pod.Spec.SchedulerName != "keti-cost-scheduler" {
+		t.Errorf("schedulerName = %q, want %q", pod.Spec.SchedulerName, "keti-cost-scheduler")
 	}
 	want := map[string]string{
 		"sched.ai/acc-type":   "gpu",
@@ -159,8 +159,8 @@ func TestWorkloadToPodNPUAnnotationFlow(t *testing.T) {
 		"sched.ai/predicted-cost-by-model":  "warboy=0.0072,rngd=0.014",
 		"sched.ai/predicted-power-by-model": "warboy=60,rngd=110",
 	})
-	if pod.Spec.SchedulerName != "cost-based-scheduler" {
-		t.Errorf("schedulerName = %q, want cost-based-scheduler", pod.Spec.SchedulerName)
+	if pod.Spec.SchedulerName != "keti-cost-scheduler" {
+		t.Errorf("schedulerName = %q, want keti-cost-scheduler", pod.Spec.SchedulerName)
 	}
 }
 

@@ -206,7 +206,7 @@ def main() -> int:
     use_amp = args.precision == "fp16"
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
-    # warmup 5 steps (not scored in step stats, but included in wall/energy window? 
+    # warmup 5 steps (not scored in step stats, but included in wall/energy window?
     # Protocol: warmup outside scored window for step times; energy covers scored steps only.)
     x = torch.randn(args.batch, 3, args.image_size, args.image_size, device=device)
     y = torch.randint(0, args.num_classes, (args.batch,), device=device)

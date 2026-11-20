@@ -17,7 +17,6 @@ GOLDEN_CANDIDATES = [
     / "workloadcontext"
     / "testdata"
     / "environment_keys_golden.json",
-    Path("/root/work/cost-based-scheduler/internal/workloadcontext/testdata/environment_keys_golden.json"),
 ]
 
 

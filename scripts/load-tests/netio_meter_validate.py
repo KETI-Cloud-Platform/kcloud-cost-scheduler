@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NETIO Out1+Out2 cumulative Energy validation (KPI 4 meter_check).
+"""NETIO Out1+Out2 cumulative Energy validation (meter check).
 
 Uses host UTC / monotonic clock for boundaries. Does not substitute device J
 when counters fail. Agent.Time is recorded but not trusted as the interval clock.
@@ -181,8 +181,8 @@ def main() -> None:
         "change_gap_s_median": (
             sorted(change_gaps)[len(change_gaps) // 2] if change_gaps else None
         ),
-        "unit_note": "Energy integer treated as Wh on .70: idle cross-check 2026-10-27 counter Δ48 vs Load integral 47.82 Wh (~0.4%); idle ~304 W",
-        "agent_time_note": "Agent.Time observed invalid (1970) on .70; host_utc/mono used for boundaries",
+        "unit_note": "Energy integer treated as Wh (cross-checked against the Load power integral at idle, ~0.4% difference)",
+        "agent_time_note": "Agent.Time can be invalid (1970) on some PDUs; host_utc/mono used for boundaries",
         "formula": "E_server = sum(Energy_end - Energy_start) for Out IDs",
     }
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")

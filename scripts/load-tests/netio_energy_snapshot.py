@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Single NETIO Out1+Out2 Energy snap (KPI 4 primary_wh boundaries)."""
+"""Single NETIO Out1+Out2 cumulative Energy snapshot for interval boundaries."""
 
 from __future__ import annotations
 

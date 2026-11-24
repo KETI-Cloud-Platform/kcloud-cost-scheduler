@@ -1,4 +1,4 @@
-"""Minimal execution-config selector for KPI4 llm_cnn_bundle.
+"""Minimal execution-config selector for an LLM+CNN work bundle.
 
 Does not call live Catalog; callers inject profiles (fixture or lookup results).
 Does not mutate cluster state.
@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping, Optional, Sequence
 
-POLICY_VERSION = "kpi4-auto-select-20261028.1"
+POLICY_VERSION = "exec-config-select-1"
 
 LOCKED_REQUESTS_SHA = (
     "e12a54b63b7d5745e80a78520fea0aa19cb0182a563b6ed2c870fce8c18e88e7"

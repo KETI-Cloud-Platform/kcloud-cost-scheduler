@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pre-open Pod watch; KPI7 timing with explicit create-request stamps.
+"""Pre-open Pod watch; create-to-assign timing with explicit create-request stamps.
 
 CRITICAL: never use first watch observation as create-request time.
   t_create_req  = client monotonic just before Pod create API
@@ -294,7 +294,7 @@ class PodAssignWatch:
                     "Pods without client create stamp are excluded from W_sched aggregates."
                 ),
             }
-        (self.out / "kpi7_assign_watch.json").write_text(json.dumps(rep, indent=2) + "\n")
+        (self.out / "assign_watch.json").write_text(json.dumps(rep, indent=2) + "\n")
         (self.out / "watch_meta.json").write_text(json.dumps(self.watch_meta, indent=2) + "\n")
         return rep
 
@@ -327,7 +327,7 @@ def create_pod_timed(watch: PodAssignWatch, yaml_path: Path) -> dict[str, Any]:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ns", default="kpi4")
+    ap.add_argument("--ns", default="accel-jobs")
     ap.add_argument("--out", required=True)
     ap.add_argument("--duration-s", type=float, default=0)
     args = ap.parse_args()

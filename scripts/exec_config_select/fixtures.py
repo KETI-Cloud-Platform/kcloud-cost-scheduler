@@ -12,7 +12,7 @@ FIXTURE_PROFILES = {
         predicted_server_wh=136.0,
         sla_pass=True,
         confidence="MEASURED",
-        profile_id="fixture:ab_compare_20261027T082807Z:A_median",
+        profile_id="fixture:ab_compare:A_median",
         notes="Wh 136/140/135; default-scheduler; human-pinned devices",
     ),
     "B_rngd_gpu": BundleProfile(
@@ -20,7 +20,7 @@ FIXTURE_PROFILES = {
         predicted_server_wh=88.0,
         sla_pass=True,
         confidence="MEASURED",
-        profile_id="fixture:ab_compare_20261027T082807Z:B_median",
+        profile_id="fixture:ab_compare:B_median",
         notes=(
             "Wh 88/88/87; observed_serial: CNN Pending while LLM Running "
             "(pods_t8s); not true parallel overlap profile"

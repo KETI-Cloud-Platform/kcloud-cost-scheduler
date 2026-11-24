@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ResNet50 GPU inference with fixed image count termination (KPI 4).
+"""ResNet50 GPU inference with fixed image count termination.
 
 Processes exactly --images images (batch-aligned), synchronizes the last GPU
 op, then exits. Synthetic tensor input (not a dataset accuracy run).

@@ -1,6 +1,0 @@
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: kpi4
-  labels:
-    app.kubernetes.io/part-of: kpi4-pro6000

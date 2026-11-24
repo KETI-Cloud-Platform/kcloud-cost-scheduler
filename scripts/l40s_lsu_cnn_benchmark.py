@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""L40S LSU-reference CNN throughput (NOT KPI4 CNN).
+"""L40S LSU-reference CNN throughput (not the fixed-image CNN workload).
 
 Matches KETRIS lsu/benchmark.py contract:
   ResNet50 weights=None, FP16, 224x224, CUDA Event GPU timing.
@@ -130,7 +130,7 @@ def main() -> None:
     ap.add_argument(
         "--pytorch-image",
         default="pytorch/pytorch:2.7.1-cuda12.8-cudnn9-runtime",
-        help="record digest of image used for KPI path; host torch may differ",
+        help="record digest of image used for the fixed-image CNN workload; host torch may differ",
     )
     args = ap.parse_args()
 
@@ -176,11 +176,11 @@ def main() -> None:
             "timing": "torch.cuda.Event",
             "cudnn_benchmark": True,
         },
-        "differs_from_kpi4_cnn_gpu_fixed_images": {
-            "kpi4_weights": "ResNet50_Weights.DEFAULT (pretrained)",
-            "kpi4_batch_default": 8,
-            "kpi4_termination": "fixed image count M (wall/perf_counter style loop)",
-            "kpi4_purpose": "KPI4 work quantum energy, not LSU unit calibration",
+        "differs_from_cnn_gpu_fixed_images": {
+            "fixed_images_weights": "ResNet50_Weights.DEFAULT (pretrained)",
+            "fixed_images_batch_default": 8,
+            "fixed_images_termination": "fixed image count M (wall/perf_counter style loop)",
+            "fixed_images_purpose": "work-quantum energy, not LSU unit calibration",
             "lsu_purpose": "img/s → provisional LSU via unit 42.16",
         },
         "config_locked": {
@@ -191,7 +191,7 @@ def main() -> None:
             "unit_img_per_s": args.unit_img_per_s,
         },
         "condition_match_verdict": (
-            "LSU_benchmark_contract_ok_not_kpi4_cnn"
+            "LSU_benchmark_contract_ok_not_fixed_images_cnn"
         ),
     }
     (out_dir / "condition_check.json").write_text(

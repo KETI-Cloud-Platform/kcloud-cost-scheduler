@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Poll container cgroup memory.current / memory.peak for kpi4 pods on this node.
+"""Poll container cgroup memory.current / memory.peak for pods of one namespace on this node.
 
-Run on the node (.232). Records paths, UIDs, and host free memory.
+Run on the node. Records paths, UIDs, and host free memory.
 """
 from __future__ import annotations
 
@@ -124,7 +124,7 @@ def read_mem(cg: str) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ns", default="kpi4")
+    ap.add_argument("--ns", default="accel-jobs")
     ap.add_argument("--pods", required=True, help="comma-separated pod names")
     ap.add_argument("--out", required=True)
     ap.add_argument("--interval-s", type=float, default=2.0)

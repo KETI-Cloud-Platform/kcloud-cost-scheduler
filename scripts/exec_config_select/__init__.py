@@ -1,4 +1,4 @@
-"""KPI4 trial-only execution-config selector (T3/T4)."""
+"""Trial-only execution-config selector."""
 
 from .selector import (
     POLICY_VERSION,

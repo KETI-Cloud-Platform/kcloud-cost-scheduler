@@ -36,13 +36,13 @@ python3 scripts/catalog/test_environment_key_golden.py
 | 파일 | 내용 |
 |---|---|
 | `llm_fixed_request_list.py` | 고정 LLM 요청 목록을 끝까지 실행(스트리밍). TTFT·TPOT·토큰 수 기록 |
-| `build_kpi4_request_list.py` | 모델 토크나이저로 입력 토큰 수를 맞춘 고정 요청 목록 생성 |
+| `build_fixed_request_list.py` | 모델 토크나이저로 입력 토큰 수를 맞춘 고정 요청 목록 생성 |
 | `cnn_gpu_fixed_images.py` | ResNet50 GPU 추론, 고정 이미지 수에서 종료 |
 | `cnn_gpu_background.py` | ResNet50 GPU 배경 부하(CNN+LLM 혼합 실험용) |
 | `gpu_train_fixed_steps.py` | ResNet50 고정 step GPU 학습 |
 | `run_serve_train_colocate.py` | LLM Serving 부하와 GPU 학습 동시 실행 |
-| `kpi4_llm_job_entry.sh`, `kpi4_rngd_job_entry.sh` | Job 진입점: 엔진 시작 → 고정 요청 실행 → 엔진 종료(GPU vLLM / RNGD furiosa-llm) |
-| `l40s_lsu_cnn_benchmark_20261029.py` | L40S LSU 기준 CNN 처리량(별도 환경 기준값) |
+| `llm_gpu_job_entry.sh`, `llm_rngd_job_entry.sh` | Job 진입점: 엔진 시작 → 고정 요청 실행 → 엔진 종료(GPU vLLM / RNGD furiosa-llm) |
+| `l40s_lsu_cnn_benchmark.py` | L40S LSU 기준 CNN 처리량(별도 환경 기준값) |
 
 ## 스케줄링 측정
 
@@ -50,17 +50,17 @@ python3 scripts/catalog/test_environment_key_golden.py
 |---|---|
 | `measure_q2_schedule_latency.py` | 제출 → `spec.nodeName` 첫 관측까지 시간(폴링) |
 | `measure_q2_schedule_latency_v2.py` | 생성 전에 watch를 시작해 배정 시각 측정 |
-| `kpi4_pod_watch_assign.py` | Pod 생성 요청·응답 시각 기록, 이름·UID 반환 |
-| `kpi4_phase_timing.py` | Job별 `<phase>_start_unix`·`<phase>_end_unix` 집계 |
-| `kpi4_dump_pending_rich.py` | Pending 시점의 할당량·요청량·이벤트 스냅샷 |
-| `kpi4_cgroup_memory_peak.py` | 노드에서 컨테이너 cgroup 메모리 최대값 기록 |
+| `pod_watch_assign.py` | Pod 생성 요청·응답 시각 기록, 이름·UID 반환 |
+| `job_phase_timing.py` | Job별 `<phase>_start_unix`·`<phase>_end_unix` 집계 |
+| `dump_pending_pods.py` | Pending 시점의 할당량·요청량·이벤트 스냅샷 |
+| `pod_cgroup_memory_peak.py` | 노드에서 컨테이너 cgroup 메모리 최대값 기록 |
 
 ## 결과 검증·분석
 
 | 파일 | 내용 |
 |---|---|
 | `validate_run.py` | 실험 결과 파일 구성 검증 |
-| `kpi4_usage_check.py` | 요청별 입력·출력 토큰 수 확인 |
+| `token_usage_check.py` | 요청별 입력·출력 토큰 수 확인 |
 | `scrape_vllm_metrics.py` | vLLM `/metrics`를 주기적으로 CSV로 저장 |
 | `k2_gate_equal_blocks.py` | 두 엔진의 `num_gpu_blocks` 일치 확인 |
 | `verify_k2_jtoken_from_raw.py` | 원본으로 p99·토큰 합계·J/token 재계산 |
@@ -68,7 +68,7 @@ python3 scripts/catalog/test_environment_key_golden.py
 | `analyze_g1_g2_g3.py` | G1/G2/G3 비교와 비용 분해 |
 | `find_g1_knee.py`, `find_npu_knee.py` | 포화 지점(knee) 탐색. NPU는 RNGD 단독 곡선 기준 |
 
-## 실행 구성 선택 (`kpi4_auto_select/`)
+## 실행 구성 선택 (`exec_config_select/`)
 
 | 파일 | 내용 |
 |---|---|
@@ -77,7 +77,7 @@ python3 scripts/catalog/test_environment_key_golden.py
 | `test_selector.py` | 정상·SLO 실패·조회 누락·동점·후보 없음·장치 고정 시험 |
 
 ```bash
-python3 -m unittest scripts.kpi4_auto_select.test_selector
+python3 -m unittest scripts.exec_config_select.test_selector
 ```
 
 ## Operator 배포 (이전 구성)

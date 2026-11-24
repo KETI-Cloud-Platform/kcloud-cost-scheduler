@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drive a fixed LLM request list to completion (KPI 4).
+"""Drive a fixed LLM request list to completion.
 
 Streaming OpenAI-compatible chat completions:
   - first_sse_ms: time to first SSE data line
@@ -10,7 +10,7 @@ incomplete_stream).
 
 Engine/model load is outside this process. Orchestrators must record LLM
 load_* intervals from the serving container and merge with CNN intervals via
-kpi4_phase_timing.py (union, not sum). This runner emits run_start/run_end for
+job_phase_timing.py (union, not sum). This runner emits run_start/run_end for
 the request batch only.
 """
 
@@ -257,7 +257,7 @@ def main() -> None:
         "run_end_unix": run_end_unix,
         "duration_s": time.perf_counter() - t0,
         "note": "load_* must be supplied by orchestrator from engine lifecycle; "
-        "merge overlaps with kpi4_phase_timing.py",
+        "merge overlaps with job_phase_timing.py",
         "results": results,
     }
     Path(args.result_file).write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")

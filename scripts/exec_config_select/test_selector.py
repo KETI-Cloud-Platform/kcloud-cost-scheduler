@@ -1,4 +1,4 @@
-"""Local T4 cases: normal / SLO fail / lookup miss / tie / none eligible / device pinned."""
+"""Selector cases: normal / SLO fail / lookup miss / tie / none eligible / device pinned."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ except ImportError:
 
 
 def _spec(**kw):
-    base = dict(work_id="t4-test")
+    base = dict(work_id="selector-test")
     base.update(kw)
     return WorkBundleSpec(**base)
 

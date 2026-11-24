@@ -62,7 +62,7 @@ def main() -> None:
             raise SystemExit(f"request {i}: got {n_tok} tokens want {args.target_in}")
         rows.append(
             {
-                "request_id": f"kpi4-{i:05d}",
+                "request_id": f"req-{i:05d}",
                 "model": args.model,
                 "messages": [{"role": "user", "content": text}],
                 "max_tokens": args.max_tokens,

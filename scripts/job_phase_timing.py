@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""KPI 4: merge per-job time intervals without double-counting overlaps.
+"""Merge per-job time intervals without double-counting overlaps.
 
 Server-level load (or any phase) share must use the union length of intervals,
 not the sum of per-job durations. Phases need not partition 100% of wall time.

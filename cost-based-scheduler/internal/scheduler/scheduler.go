@@ -56,7 +56,7 @@ type ScheduleResult struct {
 	PluginResultMap utils.PluginResultMap
 	// AttemptID links Filter/HAMi/Bind JSONL events for one scheduling try.
 	AttemptID string
-	// Timing is optional KPI7 baseline clocks (verification class).
+	// Timing is optional scheduling-latency clocks (verification class).
 	Timing *PhaseTiming
 }
 

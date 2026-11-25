@@ -130,10 +130,9 @@ status:
 ### 빠른 시작
 
 ```bash
-# Helm을 사용한 설치 (권장)
-helm install kcloud-operator ./charts/kcloud-operator \
-  --namespace kcloud-operator-system \
-  --create-namespace
+# CRD 설치 및 Operator 배포
+make install
+make deploy IMG=<registry>/kcloud-operator:<tag>
 
 # 설치 확인
 kubectl get pods -n kcloud-operator-system
@@ -144,7 +143,7 @@ kubectl get crd | grep kcloud.io
 
 ```bash
 # 의존성 다운로드
-make deps
+go mod download
 
 # CRD 생성
 make generate
@@ -395,7 +394,6 @@ make test-e2e
 - **[사용 예시](docs/EXAMPLES.md)**: 다양한 워크로드 최적화 예시
 - **[개발자 가이드](docs/DEVELOPER_GUIDE.md)**: 개발 환경 설정 및 기여 가이드
 - **[배포 가이드](docs/DEPLOYMENT_GUIDE.md)**: 프로덕션 배포 및 운영 가이드
-- **[Helm 차트](charts/kcloud-operator/README.md)**: Helm 차트 사용법
 
 ## 기여하기
 

@@ -1,6 +1,6 @@
 # load-tests
 
-GPU·NPU LLM 서빙의 지속 부하 시험과 서버 전력 측정 도구입니다. 결과는 Catalog 적재(`../catalog/ingest_run.py`)와 KPI 산출에 사용합니다.
+GPU·NPU LLM 서빙의 지속 부하 시험과 서버 전력 측정 도구입니다. 결과는 Catalog 적재(`../catalog/ingest_run.py`)와 성능·전력 분석에 사용합니다.
 
 서버 주소, 전력계 URL, 결과 경로는 파일에 넣지 않고 실행할 때 인자나 환경변수로 지정하십시오.
 

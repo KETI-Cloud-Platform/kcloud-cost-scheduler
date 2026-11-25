@@ -20,7 +20,7 @@ def kubectl_json(args: list[str]):
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ns", default="accel-jobs")
-    ap.add_argument("--node", default="gpu-npu-server-02")
+    ap.add_argument("--node", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--scheduler-log-lines", type=int, default=200)
     args = ap.parse_args()

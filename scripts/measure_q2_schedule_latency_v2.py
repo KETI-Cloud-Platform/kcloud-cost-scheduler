@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import re
 import subprocess
@@ -525,7 +526,7 @@ def run_trial(
     else:
         # default-scheduler: kube-system static pod logs if available
         r = subprocess.run(
-            ["kubectl", "-n", "kube-system", "logs", "kube-scheduler-gpu-npu-server-02", f"--since=90s"],
+            ["kubectl", "-n", "kube-system", "logs", "kube-scheduler-" + os.environ.get("CONTROL_PLANE_NODE", "control-plane"), f"--since=90s"],
             text=True,
             capture_output=True,
         )
